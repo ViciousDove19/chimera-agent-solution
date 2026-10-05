@@ -1,0 +1,25 @@
+# @package _global_
+# The submission configuration: Qwen3.5-9B quantised to FP8, which is what
+# brings it inside the 16 GB line. Measured resident: 10.81 GiB of weights plus
+# 2.2 GiB of KV cache, 14.0 GiB total, against 38.2 GiB for the BF16 server we
+# iterate with. Serve it with:
+#
+#   vllm serve <snapshot> --served-model-name model --port 8767 \
+#     --quantization fp8 --gpu-memory-utilization 0.347 \
+#     --max-model-len 16384 --max-num-seqs 8
+model:
+  provider: openai
+  model_id: model
+  base_url: http://127.0.0.1:8767/v1
+  api_key_env: LLAMA_API_KEY
+  request_timeout: 900
+  extra_body:
+    chat_template_kwargs:
+      enable_thinking: false
+generation:
+  temperature: 0.0
+  top_p: 1.0
+  max_new_tokens: 1024
+agent:
+  mode: agentic
+  concurrency: 4

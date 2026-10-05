@@ -1,0 +1,26 @@
+# @package _global_
+# Qwen3.6-35B-A3B Q4_K_M served by pinned llama.cpp CUDA 13 (server-cuda13-b10236)
+# on an OpenAI-compatible endpoint. Start the server with:
+#
+#   sg docker -c "docker run -d --rm --name qwen-server --gpus '\"device=1\"' \
+#     -v /tmp/chimera-models/qwen3.6-35b-a3b:/models -p 8765:8765 \
+#     ghcr.io/ggml-org/llama.cpp:server-cuda13-b10236 \
+#     -m /models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --host 0.0.0.0 --port 8765 \
+#     -ngl 99 -c 16384 -np 4 --jinja"
+model:
+  provider: openai
+  model_id: qwen3.6-35b-a3b
+  base_url: http://127.0.0.1:8765/v1
+  api_key_env: LLAMA_API_KEY
+  request_timeout: 900
+  # ⚠️ Qwen3.6 emits chain-of-thought into `reasoning_content` and it is billed
+  # against max_tokens, so a structured-extraction prompt returns EMPTY content:
+  # the model spends the whole budget thinking. `--reasoning-budget 0` on the
+  # server does not stop it; this does. Measured on a 3-case smoke: 5/9 blocks
+  # parsed with thinking on, 9/9 with it off.
+  extra_body:
+    chat_template_kwargs:
+      enable_thinking: false
+generation:
+  temperature: 0.3
+  max_new_tokens: 4096

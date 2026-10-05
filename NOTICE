@@ -1,0 +1,23 @@
+CHIMERA-Agent solution
+Copyright 2026 Chinmay
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+with the exception noted below.
+
+It is derived from the CHIMERA-Agent baseline
+(https://github.com/DIAGNijmegen/chimera-agent-baseline).
+
+EAU GUIDELINE CONTENT
+---------------------
+The decision rules, recommendation identifiers and short excerpts in
+resources/task1_graph.yaml, resources/task2_graph.yaml,
+resources/task1_policy.yaml, resources/task2_policy.yaml and
+resources/agentic_task1.yaml are derived from:
+
+  EAU Guidelines on Prostate Cancer, 2026 edition.
+  European Association of Urology. https://uroweb.org/guidelines/prostate-cancer
+
+That content is NOT licensed under the Apache License. It is provided only for
+non-commercial research within the CHIMERA-Agent challenge, under the terms at
+https://chimera-agent.grand-challenge.org/eau-guideline-use/ , and may not be
+reproduced, published, transferred or reused outside CHIMERA-Agent.

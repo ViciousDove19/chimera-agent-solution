@@ -1,0 +1,26 @@
+**
+!Dockerfile
+!requirements.txt
+!inference.py
+!src/
+!src/**
+!configs/
+!configs/**
+!templates/
+!templates/**
+!resources/
+!resources/task3_head.json
+# ⚠️ The decision GRAPHS. `**` above denies everything, so a resource that is
+# not named here does not enter the image and `policy_graph.load` fails at the
+# first case -- the same mechanism that silently kept the RAG assets out of
+# every image we ever built.
+!resources/task1_graph.yaml
+!resources/task2_graph.yaml
+# ⚠️ Same mechanism, three more files the Dockerfile COPYs by name. Missing
+# here on 2026-09-11 and caught by the pre-freeze audit: `**` denied them, so
+# the COPY had no source and the build failed. `agentic_task1.yaml` is the one
+# that is also needed at RUN time -- orchestrate.py reads its thresholds on
+# every case, and briefs.confidence_rule cannot label a case without them.
+!resources/agentic_task1.yaml
+!resources/task1_policy.yaml
+!resources/task2_policy.yaml

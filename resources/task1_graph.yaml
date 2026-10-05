@@ -1,0 +1,802 @@
+# The Task 1 decision policy as a graph.
+#
+# Transcribed from `docs/updated_policy.md` -- sections 2 (rule definitions),
+# 3 (decision matrix lookup table) and 4 (reference pseudocode). The structure
+# and every threshold are the document's; nothing here is invented, and where
+# the document states the same node three times and the three disagree, all
+# three are recorded and the node carries `conflict:`. Choosing between them is
+# a policy call for the owner, not a transcription decision.
+#
+# ⚠️ COMPLETE DATA ONLY. No node has a missing-evidence edge. That is
+# deliberate: the first question is whether the policy answers every clinical
+# situation when the record is full. Missing-evidence branches, the sensitivity
+# sweep and the `uncertain` mechanism are a later phase.
+#
+# `reads` names the variables a node needs. `edges` are evaluated in order and
+# the first match wins, EXCEPT that the audit evaluates all of them to detect a
+# combination that satisfies more than one -- see scripts/audit_policy_graph.py.
+
+version: 1
+source: docs/updated_policy.md
+entry: step0_benefit_window
+
+# ---------------------------------------------------------------------------
+# The variables the policy reads, and the values the sweep walks. Continuous
+# quantities are sampled below / at / above every threshold the policy names,
+# so a boundary written `<` where `<=` was meant shows up as a finding.
+# ---------------------------------------------------------------------------
+variables:
+  encounter:
+    kind: categorical
+    values: [NAIVE, PRIOR_NEGATIVE, PRIOR_POSITIVE]
+  pirads:
+    uncertainty: {step: 1, kind: category}
+    uncertainty_source: >-
+      One PI-RADS category. Pooled inter-reader agreement for v2.1 is kappa 0.65
+      for the whole gland (systematic review and meta-analysis, 12 studies,
+      2,475 patients, PMC9554626), so two radiologists disagreeing by a category
+      is routine rather than exceptional. This is what makes an ordinal step
+      CHEAP in these units, which is the opposite of what a raw-units distance
+      would say -- and it is why `decision_boundary_fragile` failed when it
+      treated an adjacent-value change as a small perturbation without saying
+      whose scale it was small on.
+    kind: ordinal
+    values: [1, 2, 3, 4, 5]
+  prior_isup:
+    kind: ordinal
+    values: [1, 2, 3, 4, 5]
+    tracks: [PRIOR_POSITIVE]
+    absent_domain: [1, 2, 3]
+    absent_domain_source: >-
+      What the record could plausibly carry when the grade is unretrievable. A
+      man carrying ISUP 4 or 5 would have left surveillance at
+      `t3a_grade_ceiling` already, so sweeping those asks what the policy does
+      for a patient who is not in this population.
+      ⚠️ The sweep is a CONFIDENCE instrument, not a decision one. Picking the
+      value that scores best -- ISUP 1, worth 19/27 against 16 -- was rejected:
+      it would make an unrecorded grade into evidence of a low one.
+  psa:
+    uncertainty: {fraction: 0.20, kind: proportional}
+    uncertainty_source: >-
+      The reference change value: the smallest difference between two PSA
+      measurements that means anything. Fraser-Harris,
+      RCV = z*sqrt(2)*sqrt(CVa^2 + CVi^2), with within-subject biological
+      variation 6.8-7.3% (European Biological Variation Study, PMID 30063887)
+      and analytical variation around 5%, gives roughly 20%. Published critical
+      differences run 15-20% (European) to a median 20.5% (AUA day-to-day
+      study). A PSA of 4 against 9 is therefore several units apart, not one.
+    kind: continuous
+    # 100.0 is A2_advanced_exception's line. Without it the sweep never samples
+    # a PSA high enough to exercise the advanced-disease exit, and reports that
+    # edge as dead when it is only unsampled.
+    thresholds: [4.0, 10.0, 15.0, 20.0, 100.0]
+  psad:
+    uncertainty: {fraction: 0.25, kind: proportional}
+    uncertainty_source: >-
+      PSA's reference change value compounded with the gland measurement it is
+      divided by. Volume reproducibility is high -- intra- and inter-reader ICC
+      above 0.90 across three methods and seven radiologists, quoted in
+      resources/eau_2026/diagnostic_evaluation_2026.txt -- so the density's
+      unit is a little wider than the PSA's and not much.
+    kind: continuous
+    thresholds: [0.05, 0.10, 0.15, 0.20]
+  psav:
+    uncertainty: {fraction: 0.30, kind: proportional}
+    uncertainty_source: >-
+      A velocity is a difference of two PSA measurements over time, so both
+      measurements' reference change values propagate into it. Wider than the
+      PSA's own unit by construction.
+    kind: continuous
+    thresholds: [0.75, 1.5]
+  vol:
+    uncertainty: {fraction: 0.10, kind: proportional}
+    uncertainty_source: >-
+      Intra- and inter-reader ICC above 0.90 for MRI gland volume across
+      ellipsoid and planimetry methods (EAU diagnostic evaluation chapter);
+      TRUS reads on average 8% smaller than MRI. Taken as 10%.
+    kind: continuous
+    thresholds: [35, 60]
+  age:
+    uncertainty: {step: 0, kind: exact}
+    uncertainty_source: "Recorded exactly; a date of birth is not a measurement."
+    kind: continuous
+    thresholds: [75, 80]
+  ipss:
+    kind: continuous
+    thresholds: [7, 19]
+  lesion_mm:
+    uncertainty: {fraction: 0.20, kind: proportional}
+    uncertainty_source: >-
+      ⚠️ NOT SOURCED. Placeholder at 20% pending a reader-variability figure for
+      the greatest lesion dimension. Treat any confidence that turns on this
+      variable as provisional.
+    kind: continuous
+    thresholds: [12, 14, 20]
+    note: >-
+      Greatest dimension in the MRI report. Read by
+      `agentic/orchestrate.py::_lesion_mm` from the revealed get_mri_report;
+      it parses on 88 of the 91 labelled cases. The thresholds are the
+      per-category ceilings in resources/agentic_task1.yaml (lesion_size_mm
+      grey_max): 12 mm at PI-RADS 3, 14 at PI-RADS 4, 20 at PI-RADS 5.
+  fh:
+    kind: categorical
+    values: [true, false]
+    note: >-
+      A family history of prostate cancer. Served ONLY by get_family_history, so
+      on the live path it is often unknown -- which is why every guard tests its
+      STATE (`fh is False`) rather than its truth. The omit edges need family
+      history POSITIVELY EXCLUDED; unknown is not exclusion, and such a case goes
+      to the integrated reading instead. Silence does not admit.
+      EAU states it verbatim as a conjunct
+      of both omit-rules (M2, M3) and no node in updated_policy.md read it.
+      Served by `get_family_history`.
+  dre_suspicious:
+    kind: categorical
+    values: [true, false]
+    note: >-
+      A malignant-feeling prostate on examination -- `dre` in {Nodus,
+      Suspicious, Abnormal}, the same list the frozen policy uses
+      (task1_policy.yaml -> corroboration.dre_suspicious). Recorded on 195/195.
+  grade_gap:
+    kind: derived
+    derived: "pirads - {1: 3, 2: 4, 3: 5}[prior_isup]"
+    needs: [pirads, prior_isup]
+    note: >-
+      How many PI-RADS categories the imaging sits ABOVE the highest category
+      the recorded grade predicts (updated_policy.md 3B.1: ISUP 1 permits up to
+      PI-RADS 3, ISUP 2 up to 4, ISUP 3 up to 5). 0 or less is concordance; 1 is
+      a one-category mismatch; 2 is the two-category jump, which only ISUP 1
+      with PI-RADS 5 can produce on this matrix.
+  psad_usable:
+    kind: derived
+    derived: "usable(psad, psa, vol)"
+    needs: [psad]
+    note: >-
+      The density the policy is entitled to read. `task1.py::usable_density`:
+      the record states it twice -- directly, and implicitly as PSA over volume
+      -- and past a 50% disagreement the quotient is not a measurement of this
+      patient. Fires on 1 of the 91 labelled cases.
+      ⚠️ Only the reclassification branch reads this today; every other node
+      still reads the raw `psad`. Recorded as a divergence to close.
+  suspicion_likely:
+    kind: derived
+    derived: "pirads >= 4 or (pirads == 3 and (psad or 0) > 0.20) or (vol > 70 and psa >= 8 and not (pirads >= 4))"
+    needs: [pirads, psa, psad, vol]
+    note: >-
+      Does the non-histologic evidence point at cancer? PI-RADS carries the
+      direction; at PI-RADS 3 the density decides. The third clause is
+      `task1.py::signal`'s confounded density: a gland over 70 mL with a PSA
+      over 8 makes the quotient uninterpretable -- you cannot say whether the
+      PSA came from the tumour or the bulk -- so a diluted density does not get
+      to suppress the case. Both gates are needed: with a LOW PSA there is
+      nothing to attribute and a low density really is reassuring.
+  corroboration_votes:
+    kind: derived
+    derived: "count(psa >= 15, (psad or 0) > 0.10, dre_suspicious)"
+    needs: [psa, psad, dre_suspicious]
+    note: >-
+      How many independent channels corroborate the imaging. Voting and being
+      read are not the same: the density votes only at the high end, and a
+      normal examination argues nothing at all
+      (`task1.py::signal`, corroboration block).
+  bio_channels_past:
+    kind: derived
+    derived: "count(psa > 10.0, psad > 0.15, psav > 1.5)"
+    needs: [psa, psad, psav]
+    note: >-
+      How many of PSA, PSA density and PSA velocity sit past their own lines
+      (10.0 ng/mL, 0.15 ng/mL/cc, 1.5 ng/mL/yr).
+  bio_excess:
+    kind: derived
+    derived: "excess((psa, 10.0), (psad, 0.15), (psav, 1.5))"
+    needs: [psa, psad, psav]
+    note: >-
+      HOW FAR past, summed: for each channel over its line, value/line - 1,
+      added up. PSA 21 against a 10 line contributes 1.1; PSA velocity 5.99
+      against 1.5 contributes 2.99. It measures the STRENGTH of a disagreement
+      with the imaging rather than its bare existence.
+  psadt:
+    kind: continuous
+    thresholds: [3]
+    note: >-
+      PSA doubling time in years, computed from the `psa_trend` series. EAU's
+      only licensed PSA reading in surveillance (P8, Strong). A flat or falling
+      series yields no doubling time -- a missing-evidence question, out of
+      scope for the complete-data pass.
+
+# ---------------------------------------------------------------------------
+# WHAT HAPPENS WHEN A VARIABLE IS ABSENT.
+#
+# Declared once per variable, never per node, so a new variable cannot be added
+# without an answer and a node cannot silently acquire a hole. Three classes:
+#
+#   retrieve     A tool serves it. Fetch it and walk again. Only if the fetch
+#                fails does the case fall through to `then`.
+#   order_first  It is a cheaper and safer test than the action under
+#                consideration, so the answer is to obtain it rather than to act
+#                without it. An MRI before a biopsy. Confidence is never `clear`
+#                on a recommendation that rests on an absence.
+#   historical   It existed once and is gone -- old pathology, an earlier scan
+#                nobody kept. Nothing can produce it, so the policy sweeps the
+#                values the record could plausibly have carried: if every value
+#                lands on the same answer the absence changes nothing, and if
+#                they diverge the case takes the node's stated safer action and
+#                is `uncertain`, naming the fact.
+#
+# ⚠️ NO COHORT WE HAVE EXERCISES THIS, and the framework is honest about that.
+# On the 195 released Task 1 cases only TWO variables are ever absent on a
+# walked path: `prior_isup` (80 of the 115 paths that read it) and `pirads` (1
+# of 187). Everything else is absent 0% of the time.
+#
+# ⚠️ And the external development cohort is NOT evidence of missingness either.
+# It was reverse-engineered from a submission, so a variable that does not
+# appear there was not necessarily absent from the record -- we simply cannot
+# see it. Its "PI-RADS 45/50, volume 30/50, prior grade 0/50" is EXTRACTION
+# coverage, not clinical absence, and nothing here may be justified or tuned
+# against it.
+#
+# So this cannot be validated by scoring, on any cohort we hold. It is validated
+# by CONSTRUCTION: `load` refuses a graph that leaves a variable undeclared, and
+# `scripts/audit_policy_graph.py --report missing` drops each variable in turn
+# from every case -- 1,104 single-omission walks -- and asserts the graph still
+# answers. The reason to have it is that the test set is unseen and a policy
+# that stops has no answer at all; not that we have measured a cohort that
+# needs it.
+# ---------------------------------------------------------------------------
+missing_policy:
+  pirads:
+    when_missing: order_first
+    then: no_biopsy
+    because: >-
+      An MRI is cheaper, safer and faster than a biopsy, so a man whose imaging
+      cannot be read does not skip it and go straight to tissue. Get the
+      imaging, then ask again. NOT "a missing PI-RADS is reassuring" -- the
+      decision is the same and the reason is different, and the reason is what
+      the rationale must say.
+  psa: {when_missing: order_first, then: no_biopsy,
+        because: "A PSA test is an order of magnitude cheaper than a biopsy."}
+  psad: {when_missing: order_first, then: no_biopsy,
+         because: "Computable from a PSA and a gland volume, both cheaper than tissue."}
+  vol: {when_missing: order_first, then: no_biopsy,
+        because: "Measured on the same scan the PI-RADS came from."}
+  ipss: {when_missing: order_first, then: no_biopsy,
+         because: "A questionnaire."}
+  age: {when_missing: order_first, then: no_biopsy,
+        because: "Administrative, not clinical; if it is absent the record is broken."}
+  psav: {when_missing: retrieve, by: PSA_TREND, then: no_biopsy,
+         because: "Derived from the PSA series get_psa_trend serves."}
+  psadt:
+    when_missing: retrieve
+    by: PSA_TREND
+    then: no_biopsy
+    because: >-
+      Derived from the same series. ⚠️ A flat or falling PSA has NO doubling
+      time, which is not the same as an absent one -- do not let the first be
+      read as the second.
+  lesion_mm: {when_missing: retrieve, by: LESION_SIZE, then: no_biopsy,
+              because: "Stated in the radiology report get_mri_report serves."}
+  fh:
+    when_missing: retrieve
+    by: FAMILY_HISTORY
+    declined: true
+    then: not_excluded
+    because: >-
+      Obtainable by asking, but family_history appears in 0 of the 91 reference
+      reveal sequences, so fetching it is pure tool-precision loss. We decline
+      the fetch and read the silence correctly instead: absent is NOT "no family
+      history", so it cannot satisfy an omit rule that requires family history
+      to be positively excluded. Every guard reading it tests its STATE.
+  dre_suspicious: {when_missing: order_first, then: no_biopsy,
+                   because: "An examination in clinic."}
+  prior_isup:
+    when_missing: historical
+    domain: [1, 2, 3]
+    then: t3_reclassification
+    because: >-
+      The earlier pathology report is in the record or it is nowhere; no test
+      can produce the grade this man had five years ago. So this is the one
+      variable whose absence is a branch rather than a delay, and
+      `t3_reclassification` is that branch.
+  encounter: {when_missing: order_first, then: no_biopsy,
+              because: "Structural; a record with no encounter type cannot be routed."}
+
+leaves:
+  biopsy:            {decision: "yes", says: "Biopsy"}
+  no_biopsy:         {decision: "no",  says: "No biopsy"}
+  treatment:         {decision: "no",  says: "Exit surveillance; stage and treat"}
+  watchful_waiting:  {decision: "no",  says: "No biopsy; watchful waiting"}
+
+nodes:
+
+  # --- step 0: the global gatekeeper ---------------------------------------
+  - id: step0_benefit_window
+    eau: [E1_life_expectancy, P6_as_protocol]
+    track: ALL
+    asks: "Is there a benefit window long enough for any of this to help him?"
+    reads: [age]
+    source: "updated_policy.md section 2, Step 0: Global Gatekeeper; substitution 2026-09-10"
+    substitutes_for: "an estimated life expectancy in years"
+    resolved: >-
+      As written this node read `life_expectancy_years` directly and named age,
+      the Charlson index and ECOG as its inputs without saying how they combine.
+      Charlson and ECOG appear in none of the 195 released records, so the node
+      stopped all 91 labelled cases before the policy began. Age stands in for
+      it, at the line resources/agentic_task1.yaml already uses and states the
+      reason for: male life expectancy at 80 is under ten years even in good
+      health, so age alone settles the gate there. EAU P6 sets the same horizon
+      -- active surveillance runs "until life expectancy falls below ten years".
+      ⚠️ Below 80 the comorbidity burden is what should decide, and this
+      substitution does not read it. On this cohort that costs nothing: ages
+      75-78 are labelled `yes` throughout.
+    edges:
+      - when: "age >= 80"
+        to: watchful_waiting
+      - when: "age < 80"
+        to: router
+
+  - id: router
+    eau: []   # no EAU rule licenses this node
+    track: ALL
+    asks: "What kind of encounter is this?"
+    reads: [encounter]
+    source: "updated_policy.md section 1, EncounterRouter"
+    edges:
+      - when: "encounter == 'NAIVE'"
+        to: t1_pirads
+      - when: "encounter == 'PRIOR_NEGATIVE'"
+        to: t2_pirads
+      - when: "encounter == 'PRIOR_POSITIVE'"
+        to: t3a_grade_ceiling
+    also_stated:
+      pseudocode: "an unrecognised encounter_type raises ValueError('Invalid encounter type.')"
+
+  # --- track 1: biopsy-naive / first follow-up ------------------------------
+  - id: t1_pirads
+    eau: [M1_table_5_5, M2_omit_pirads_1_2, M4_perilesional]
+    track: NAIVE
+    asks: "How suspicious is the MRI?"
+    reads: [pirads, psa, psad, fh]
+    source: "updated_policy.md section 2, Track 1 rules 1-3"
+    resolved: >-
+      Owner ruling 2026-09-12, revised after audit: for PI-RADS 2, PSA <= 4
+      ng/mL vetoes biopsy. At 4 < PSA <= 10, biopsy requires PSA density >= 0.20.
+      PSA > 10 is not sufficient; it continues through the existing branches.
+    reads_note: >-
+      `fh` added 2026-09-10. M2_omit_pirads_1_2 reads "Omit biopsy and offer PSA
+      monitoring when MRI is negative (i.e. PI-RADS <= 2), and clinical
+      suspicion of PCa is low (PSA density < 0.20 ng/mL/cc AND NO FAMILY
+      HISTORY)". The policy omitted the conjunct entirely.
+      ⚠️ M2's other conjunct, PSA density < 0.20, is still NOT read here -- see
+      docs/task1-policy-graph.md, remaining divergences.
+    missing_pirads: >-
+      A record with no assignable PI-RADS does not proceed to biopsy. The
+      reasoning is about the ORDER of investigations, not about the finding: an
+      MRI is cheaper, safer and faster than a biopsy, so a man who has not had
+      one readable does not skip it and go straight to tissue. Get the imaging,
+      then ask this question again.
+      ⚠️ This is NOT "a missing PI-RADS is reassuring". CLAUDE.md flags exactly
+      that conflation in `task1.py::signal()` as an error class -- PI-RADS NA is
+      an unassignable read, a positive finding, not a negative one. The decision
+      is the same and the reason is different, which matters: the rationale must
+      say "obtain the MRI first", never "the imaging was negative", and the
+      confidence must not be `clear` on the strength of an absent finding.
+    confidence:
+      decides_on: [pirads]
+      equivocal_edges: [t1_psa]
+      conflicts:
+        - when: "age >= 75 and pirads >= 4"
+          gives: borderline
+          because: >-
+            Suspicion against the benefit window. The imaging settles that tissue
+            is needed; the age settles that it may not help him, and the reference
+            reads that as a shared choice rather than a settled one. The deciding
+            variable is identical either side of the line -- only a NON-deciding
+            one moved, which is what makes this a conflict rather than a weak
+            read. Measured on this cohort: 2 of 2 `borderline` at age >= 75,
+            against 81% `clear` below it. EAU E1 and P6 set the horizon.
+    edges:
+      - when: "pirads is None"
+        to: no_biopsy
+      - when: "pirads == 2 and psa <= 4.0"
+        to: no_biopsy
+      - when: "pirads == 2 and 4.0 < psa <= 10.0 and psad >= 0.20"
+        to: biopsy
+      - when: "pirads == 2 and 4.0 < psa <= 10.0 and (psad is None or psad < 0.20)"
+        to: no_biopsy
+      - when: "(pirads < 2 or (pirads == 2 and (psa is None or psa > 10.0))) and fh is False"
+        to: no_biopsy
+      - when: "(pirads < 2 or (pirads == 2 and (psa is None or psa > 10.0))) and fh is not False"
+        to: integrated_risk
+      - when: "pirads == 3"
+        to: t1_psa
+      - when: "pirads >= 4"
+        to: biopsy
+
+  - id: t1_psa
+    eau: []   # no EAU rule licenses this node
+    track: NAIVE
+    asks: "Does the PSA settle an equivocal lesion?"
+    reads: [psa, fh]
+    source: "updated_policy.md section 2, Track 1 rule 3"
+    confidence:
+      decides_on: [psa]
+      equivocal_edges: [t1_psad]
+    edges:
+      - when: "psa < 4.0 and fh is False"
+        to: no_biopsy
+      - when: "psa < 4.0 and fh is not False"
+        to: integrated_risk
+      - when: "psa > 10.0"
+        to: biopsy
+      - when: "4.0 <= psa <= 10.0"
+        to: t1_psad
+
+  - id: t1_psad
+    eau: [M1_table_5_5, M3_pirads_3]
+    track: NAIVE
+    asks: "Inside the grey zone, does the density carry a case?"
+    reads: [psad, fh]
+    source: "updated_policy.md section 2, Track 1 rule 3"
+    reads_note: >-
+      M3_pirads_3: "When MRI is indeterminate (PI-RADS = 3), and clinical
+      suspicion of PCa is very low (PSA density < 0.10 ng/mL/cc and no family
+      history), omit biopsy and offer PSA monitoring. Otherwise, consider
+      targeted biopsy with perilesional sampling." The family history is the
+      conjunct the policy omitted.
+    edges:
+      - when: "psad < 0.15 and fh is False"
+        to: no_biopsy
+      - when: "psad < 0.15 and fh is not False"
+        to: integrated_risk
+      - when: "psad >= 0.15"
+        to: biopsy
+
+  # --- track 2: prior negative biopsy ---------------------------------------
+  - id: t2_pirads
+    eau: [N1_mri_after_negative_systematic]
+    track: PRIOR_NEGATIVE
+    asks: "How suspicious is the MRI in a gland already sampled negative?"
+    reads: [pirads]
+    source: "updated_policy.md section 2, Track 2 rules 1-3"
+    missing_pirads: >-
+      A record with no assignable PI-RADS does not proceed to biopsy. The
+      reasoning is about the ORDER of investigations, not about the finding: an
+      MRI is cheaper, safer and faster than a biopsy, so a man who has not had
+      one readable does not skip it and go straight to tissue. Get the imaging,
+      then ask this question again.
+      ⚠️ This is NOT "a missing PI-RADS is reassuring". CLAUDE.md flags exactly
+      that conflation in `task1.py::signal()` as an error class -- PI-RADS NA is
+      an unassignable read, a positive finding, not a negative one. The decision
+      is the same and the reason is different, which matters: the rationale must
+      say "obtain the MRI first", never "the imaging was negative", and the
+      confidence must not be `clear` on the strength of an absent finding.
+    confidence:
+      decides_on: [pirads]
+      equivocal_edges: [t2_kinetics]
+    edges:
+      - when: "pirads is None"
+        to: no_biopsy
+      - when: "pirads <= 2"
+        to: no_biopsy
+      - when: "pirads == 3"
+        to: t2_kinetics
+      - when: "pirads >= 4"
+        to: t2_high_exceptions
+
+  - id: t2_kinetics
+    eau: [N2_negative_targeted, M3_pirads_3]
+    track: PRIOR_NEGATIVE
+    asks: "At an indeterminate lesion, does the biochemistry disagree with the imaging strongly enough to want tissue?"
+    reads: [psad, psav, fh, bio_channels_past, bio_excess]
+    source: "updated_policy.md section 2, Track 2 rule 2, amended 2026-09-10"
+    resolved: >-
+      Two changes, both from the same reading. First, PSA density at or above
+      0.15 no longer earns tissue on its own: at PI-RADS 3 with grey kinetics
+      the imaging is not asking a question the density can answer alone.
+      Second, the [0.10, 0.15) band that previously matched no edge is now
+      decided the same way as everything else here -- by the STRENGTH of the
+      disagreement, not its existence. A PI-RADS 3 against a PSA of 21, a
+      density of 0.19 and a velocity of 5.99 is a large, one-directional
+      disagreement and the biochemistry is believed; a PI-RADS 3 against a
+      density that has just crossed its line is not.
+      ⚠️ The line -- two channels past, summed excess at or above 2.0 -- is
+      exercised by exactly ONE labelled case (excess 4.36 against a
+      next-highest 1.94 anywhere on this track). It separates the cohort with
+      room to spare but it is weakly evidenced; do not tune it. That case's
+      label disagrees with this answer; we read a PI-RADS 3 as unable to
+      explain a PSA of 21 with that velocity. Recorded as a deliberate
+      disagreement, not a defect.
+    confidence:
+      decides_on: [psad, psav, bio_excess]
+      equivocal_edges: [integrated_risk]
+    edges:
+      - when: "bio_channels_past >= 2 and bio_excess >= 2.0"
+        to: biopsy
+      - when: "psad < 0.10 and psav < 0.75 and fh is False"
+        to: no_biopsy
+      - when: "not (bio_channels_past >= 2 and bio_excess >= 2.0) and not (psad < 0.10 and psav < 0.75 and fh is False)"
+        to: integrated_risk
+    also_stated:
+      lookup_table: "psa < 4.0 and psad < 0.10 and psav < 0.75 -> no_biopsy; psad >= 0.15 or psav >= 0.75 -> biopsy"
+      pseudocode: "psad < 0.10 and psav < 0.75 -> no_biopsy; otherwise biopsy"
+
+  - id: t2_high_exceptions
+    eau: [N1_mri_after_negative_systematic, E1_life_expectancy]
+    track: PRIOR_NEGATIVE
+    asks: "Does anything overturn a suspicious lesion after a negative biopsy?"
+    reads: [age, psa, psad, pirads, dre_suspicious]
+    source: "updated_policy.md section 2, Track 2 rule 3 and the 2026-09-09 amendments 1-3"
+    conflict: >-
+      The section 4 pseudocode predates the 2026-09-09 amendment and carries
+      neither exception: it returns BIOPSY for every PI-RADS 4-5 case on this
+      track.
+    maximal_suspicion: >-
+      ⚠️ The age edge does NOT fire when the record is maximally suspicious --
+      PI-RADS 5 with a palpable nodule on examination. Added 2026-09-11 on the
+      owner's ruling; the freeze was lifted for this one guard.
+      The gate stands in for a life expectancy the record does not carry (see
+      `step0_benefit_window`), and a substitution may narrow a decision but may
+      not silently overrule the two findings that most strongly indicate
+      disease. EAU E1 keys the horizon on life expectancy, not on a birthday.
+      ⚠️ Measured: 0 labelled cases move -- all three labelled age-gate cases
+      have a NORMAL examination, so the guard cannot reach them -- and exactly
+      one released (unlabelled) case moves, at `t3_reclassification`. This rule carries a clinical reason and a
+      deliberately-zero number; the asymmetry is what licenses it, a false `yes`
+      costing a biopsy against a false `no` missing a PI-RADS 5 cancer with a
+      palpable nodule.
+    edges:
+      - when: "(age >= 75) and not (pirads == 5 and dre_suspicious)"
+        to: no_biopsy
+      - when: "psa < 4.0 and psad < 0.05"
+        to: no_biopsy
+      - when: "(not (age >= 75) or (pirads == 5 and dre_suspicious)) and not (psa < 4.0 and psad < 0.05)"
+        to: biopsy
+    also_stated:
+      lookup_table: "age >= 75 -> no_biopsy; psa < 4.0 and psad < 0.05 -> no_biopsy; otherwise biopsy"
+      pseudocode: "pirads in [4, 5] -> biopsy"
+
+  # --- track 3, stage 3A: is he still a surveillance patient? ---------------
+  - id: t3a_grade_ceiling
+    eau: [P1_as_standard]
+    track: PRIOR_POSITIVE
+    asks: "Does the recorded grade already put him past surveillance?"
+    reads: [prior_isup]
+    source: "updated_policy.md section 2, Track 3 stage 3A.1 histological exclusion"
+    missing_prior_isup: >-
+      An unretrievable grade is not a reason to stop: it IS the question. Unlike
+      a missing PI-RADS, nothing cheaper can be done to obtain it -- the earlier
+      pathology is either in the record or it is not -- so the case goes on
+      rather than waiting for a test nobody can order.
+      ⚠️ It goes on to the ADVANCED-DISEASE exit and the IMAGING gate first, not
+      straight to the reclassification reading. Neither of those depends on the
+      grade: a PSA of 190 with a malignant-feeling prostate makes tissue
+      pointless whatever the earlier pathology said, and a PI-RADS 2 asks no
+      question that a grade could answer. Asking the grade question first put
+      PI-RADS 2 cases, and cases with a PSA over 100 and a suspicious
+      examination, into a biopsy they had already been excused from.
+    edges:
+      - when: "prior_isup is not None and prior_isup >= 4"
+        to: treatment
+      - when: "prior_isup is None or prior_isup < 4"
+        to: t3a_advanced_disease
+
+  - id: t3_reclassification
+    eau: [P1_as_standard, P5_target_pirads_3_plus]
+    track: PRIOR_POSITIVE
+    asks: "With the grade unretrievable, is the open question one that tissue answers?"
+    reads: [pirads, psa, psad, psad_usable, vol, dre_suspicious, age, suspicion_likely, corroboration_votes]
+    source: "task1.py::tissue and signal -- the frozen policy's RECLASSIFICATION ladder, borrowed 2026-09-10"
+    reachable_only_when: "prior_isup is absent"
+    resolved: >-
+      Borrowed rather than invented: the frozen policy already answers this and
+      writes its reasons next to it. Corroboration ROUTES the question and does
+      not answer it -- two of {PSA >= 15, density > 0.10, a suspicious
+      examination} past their lines, with the imaging already suspicious, means
+      the lesion is real and the only open question is the GRADE, which only
+      tissue closes. The density can be the reassurance but only when nothing
+      corroborates the lesion. A diluted density must not veto the case. And age
+      overrides the value of a REPEAT biopsy, never the need for a first one.
+      ⚠️ An LLM consultant was given this node on 2026-09-10 and REVERTED the
+      same day: 15 of 27 correct against the edges' 20, and it emitted `clear`
+      on all 27 including the 8 the reference calls `uncertain`. Task 1
+      confidence kappa went 0.4341 -> 0.0323 and the ranking 0.7791 -> 0.7632.
+      The population really is prose-separable; a small model reading the prose
+      is not the way to separate it.
+    confidence:
+      decides_on: [suspicion_likely, corroboration_votes]
+      absent: prior_isup
+      settled_by: "pirads >= 5"
+      settled_because: >-
+        With the grade unretrievable the open question is what grade he is now --
+        unless something present settles it. A PI-RADS 5 does: imaging that
+        florid says what the missing pathology would have said, and the reference
+        calls it `clear` on 5 of 7 such cases. A PI-RADS 4 does not, and the
+        grade stays the open fact -- 23% `clear` against 71%, with 5 `uncertain`
+        and 5 `borderline` among the 13. This is the frozen policy's own rule,
+        recovered from the graph: "RECLASSIFICATION is `clear` at PI-RADS 5 and
+        `uncertain` otherwise".
+    maximal_suspicion: >-
+      ⚠️ The same guard as `t2_high_exceptions`, the same ruling, the same date.
+      The case it releases is a man in his late seventies with PI-RADS 5, a
+      palpable nodule and a steeply rising PSA -- and the earlier graph
+      answered `no_biopsy` on the strength of the birthday alone, before any of
+      those readings was consulted.
+    edges:
+      - when: "(age > 75) and not (pirads == 5 and dre_suspicious)"
+        to: no_biopsy
+      - when: "(not (age > 75) or (pirads == 5 and dre_suspicious)) and not (suspicion_likely and corroboration_votes >= 2) and psad_usable is not None and psad_usable < 0.08"
+        to: no_biopsy
+      - when: "(not (age > 75) or (pirads == 5 and dre_suspicious)) and (suspicion_likely and corroboration_votes >= 2 or psad_usable is None or psad_usable >= 0.08)"
+        to: biopsy
+
+  - id: t3a_advanced_disease
+    eau: [A2_advanced_exception]
+    track: PRIOR_POSITIVE
+    asks: "Is the suspicion of malignancy so high that tissue would add nothing?"
+    reads: [psa, dre_suspicious]
+    source: "EAU A2_advanced_exception; replaces updated_policy.md Track 3 stage 3A.2, 2026-09-10"
+    substitutes_for: "a positive bone scan"
+    resolved: >-
+      This replaces `t3a_psa_ceiling` and `t3a_confounders`, both of which let a
+      PSA LEVEL change management. The guideline forbids exactly that --
+      treatment_2026.txt: "a PSA change alone, including PSA-doubling time
+      (PSA-DT, < 3 years) should not change management ... but rather trigger
+      further investigation such as biopsy or repeat MRI", and
+      P9_change_on_biopsy_only: "Base change in treatment on biopsy
+      progression, not on progression on MRI, PSA, and/or DRE". So no PSA level
+      exits surveillance, and the one exit that survives is EAU's own
+      advanced-disease exception, stated in its terms.
+      ⚠️ A2 names three conjuncts -- "malignant feeling prostate, PSA >
+      100ng/mL and a positive bone scan". No released record contains a bone
+      scan (0 of 195), so the conjunction here rests on the two that are
+      obtainable. That is a documented substitution, not a reading of the rule.
+      ⚠️ Measured cost, accepted knowingly: the deleted `psa > 20 -> treatment`
+      edge was right on 4 labelled cases and wrong on 1; this is right on 3,
+      wrong on the same 1, and releases a PSA-70 case with a NORMAL
+      examination, labelled `no`, into the biopsy question. Expect -1.
+    edges:
+      - when: "psa > 100.0 and dre_suspicious"
+        to: treatment
+      - when: "not (psa > 100.0 and dre_suspicious)"
+        to: t3b_pirads
+
+  # --- track 3, stage 3B: the surveillance question -------------------------
+  - id: t3b_pirads
+    eau: [P5_target_pirads_3_plus]
+    track: PRIOR_POSITIVE
+    asks: "Does the imaging raise a question at all?"
+    reads: [pirads, prior_isup]
+    source: "updated_policy.md section 2, Track 3 stage 3B"
+    missing_pirads: >-
+      A record with no assignable PI-RADS does not proceed to biopsy. The
+      reasoning is about the ORDER of investigations, not about the finding: an
+      MRI is cheaper, safer and faster than a biopsy, so a man who has not had
+      one readable does not skip it and go straight to tissue. Get the imaging,
+      then ask this question again.
+      ⚠️ This is NOT "a missing PI-RADS is reassuring". CLAUDE.md flags exactly
+      that conflation in `task1.py::signal()` as an error class -- PI-RADS NA is
+      an unassignable read, a positive finding, not a negative one. The decision
+      is the same and the reason is different, which matters: the rationale must
+      say "obtain the MRI first", never "the imaging was negative", and the
+      confidence must not be `clear` on the strength of an absent finding.
+    edges:
+      - when: "pirads is None"
+        to: no_biopsy
+      - when: "pirads <= 2"
+        to: no_biopsy
+      - when: "pirads >= 3 and prior_isup is None"
+        to: t3_reclassification
+      - when: "pirads >= 3 and prior_isup is not None"
+        to: t3b_concordance
+
+  - id: t3b_concordance
+    eau: []   # no EAU rule licenses this node
+    track: PRIOR_POSITIVE
+    asks: "How far does the imaging sit above what this recorded grade predicts?"
+    reads: [grade_gap]
+    source: "updated_policy.md section 2, Track 3 stage 3B.1 grade-to-imaging concordance matrix, amended 2026-09-10"
+    resolved: >-
+      The matrix used to fork into a concordant branch and a mismatch branch
+      that then read the evidence in different orders. Both now converge on one
+      reading, so what the matrix produces is a DISTANCE rather than a fork: how
+      many PI-RADS categories the imaging sits above what the grade predicts.
+      A two-category jump is the one thing that settles the case by itself --
+      only ISUP 1 with PI-RADS 5 can produce it here -- because the imaging is
+      then describing disease the recorded grade cannot account for at all.
+      Everything else, concordant or one category out, goes to the kinetics.
+      ⚠️ The jump rule fixes one ISUP 1 / PI-RADS 5 case and breaks another
+      with similar readings. Net zero on the labelled set, adopted for the
+      mechanism rather than the number.
+    edges:
+      - when: "grade_gap >= 2"
+        to: biopsy
+      - when: "grade_gap < 2"
+        to: t3_surveillance_kinetics
+
+  - id: t3_surveillance_kinetics
+    eau: [P8_psadt_under_3y, P9_change_on_biopsy_only]
+    track: PRIOR_POSITIVE
+    asks: "Is his PSA rising fast enough to want tissue?"
+    reads: [psav]
+    source: "owner's ruling, 2026-09-10; replaces the branch A / branch B split"
+    resolved: >-
+      ONE reading for both branches. This man is under surveillance, so tissue
+      is earned by a rising PSA -- not by a density that has crossed a line
+      while the PSA sits still. That is EAU's own position
+      (P9_change_on_biopsy_only, and treatment_2026.txt: a PSA change "should
+      not change management ... but rather trigger further investigation") and
+      it replaces four nodes that each read a different channel first.
+      ⚠️ What this removes is the density firing alone: a man with a FALLING
+      PSA and a high density was biopsied on the density by the old concordant
+      audit, against the reference. Measured over the cases that reach it, the
+      change takes the concordant group from 4/7 to 6/7 and fixes two cases on
+      the mismatch side.
+      ⚠️ One case with a velocity near 4 ng/mL/yr answers `yes` here against
+      its label; we read that velocity as earning tissue. Recorded as a
+      deliberate disagreement.
+    confidence:
+      decides_on: [psav]
+      equivocal_edges: [t3_lesion_size]
+    edges:
+      - when: "psav > 1.5"
+        to: biopsy
+      - when: "psav < 0.75"
+        to: no_biopsy
+      - when: "0.75 <= psav <= 1.5"
+        to: t3_lesion_size
+
+  - id: t3_lesion_size
+    eau: [P5_target_pirads_3_plus, M4_perilesional]
+    track: PRIOR_POSITIVE
+    asks: "In the borderline band, is the lesion oversized for its own category?"
+    reads: [lesion_mm, pirads]
+    source: "owner's ruling, 2026-09-10"
+    substitutes_for: "serial MRI change / PRECISE assessment"
+    resolved: >-
+      A velocity between 0.75 and 1.5 does not settle the case either way, so
+      the lesion is asked whether it is ordinary for its own PI-RADS category.
+      The ceilings are the ones resources/agentic_task1.yaml already carries
+      (12 mm at PI-RADS 3, 14 at 4, 20 at 5), not the three contradictory
+      numbers updated_policy.md gave for PI-RADS 4 alone.
+      ⚠️ Applied per category rather than at PI-RADS 5 only, which is what
+      recovers a PI-RADS 4 lesion past its 14 mm ceiling with no case lost; an
+      equally sized PI-RADS 5 lesion is under its 20 mm ceiling and correctly
+      answers `no`.
+      ⚠️ The guideline's real trigger on surveillance is serial MRI change
+      (P7 names a stable MRI at PRECISE 3) and no released record holds a prior
+      MRI, so the lesion against its category ceiling stands in for it.
+    edges:
+      - when: "(pirads == 3 and lesion_mm > 12) or (pirads == 4 and lesion_mm > 14) or (pirads == 5 and lesion_mm > 20)"
+        to: biopsy
+      - when: "not ((pirads == 3 and lesion_mm > 12) or (pirads == 4 and lesion_mm > 14) or (pirads == 5 and lesion_mm > 20))"
+        to: no_biopsy
+
+  # --- the shared reading three of the four resolutions converge on ---------
+  - id: integrated_risk
+    eau: [M3_pirads_3, P8_psadt_under_3y, M5_negative_mri_high_suspicion]
+    track: ALL
+    asks: "Taken together, is the overall risk concerning enough to want tissue?"
+    reads: [psadt, psad, dre_suspicious, fh]
+    source: "owner's ruling, 2026-09-10; see docs/updated_policy.md amendments"
+    substitutes_for: "lesion persistence or progression on serial MRI, and whether a protocol biopsy is due"
+    resolved: >-
+      Gaps 2, 3 and 4 each asked for the same synthesis rather than a new
+      threshold, so this is one node used from three places. Nothing here is a
+      new number: the doubling time is P8's ("Perform MRI and repeat biopsy if
+      PSA is rising (PSA doubling time < 3 years)", Strong), the density line
+      and the family history are M3's, and a suspicious examination raising
+      suspicion is M5's "high clinical suspicion".
+      ⚠️ TWO signals, not one. This node is the "taken together" reading, so a
+      single channel past its line does not carry it -- the same rule the
+      kinetics nodes now follow. Written as one before, it biopsied a case on
+      a density of 0.16 with nothing else concerning, which is exactly the single-channel firing this design removed upstream.
+      ⚠️ Two inputs the owner named cannot exist on this release and are
+      substituted rather than read: MRI evolution / PRECISE (no prior MRI in any
+      record) and whether a protocol biopsy is due (CLAUDE.md records that
+      `months` only takes the values 1, 2 and 3 and is NOT time since the last
+      biopsy, so it must not be used for this).
+    edges:
+      - when: "count(psadt < 3, psad >= 0.15, dre_suspicious, fh is True) >= 2"
+        to: biopsy
+      - when: "count(psadt < 3, psad >= 0.15, dre_suspicious, fh is True) < 2"
+        to: no_biopsy

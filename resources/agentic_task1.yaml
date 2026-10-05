@@ -1,0 +1,159 @@
+# Thresholds for the Task 1 agentic policy. Every value here is interpolated
+# into an agent brief at render time, so a sweep changes behaviour without
+# touching a prompt. Sources: docs/agentic_plan.md §3, docs/updated_policy.md.
+life_expectancy_years: 10
+# Actuarial anchor for the eligibility gate. Male life expectancy at 80 is under
+# 10 years even in good health, so age alone settles the gate there. Below it,
+# comorbidity decides -- ages 75-78 are labelled `yes` throughout this cohort.
+life_expectancy_certain_age: 80
+
+management:
+  isup_exit_grade: 4        # >= exits active surveillance
+  psa_metastatic: 20.0
+  psa_borderline_low: 15.0
+
+# value < low -> LOW; low <= value <= high -> GREY; value > high -> HIGH
+psa:  {low: 4.0,  high: 10.0}    # ng/mL
+psad: {low: 0.10, high: 0.15}    # ng/mL/cc
+# The lowest density zone: below this a man carries no biochemical case of his
+# own. Separate from psad.low, which is only "argues against".
+psad_reassuring: 0.05
+psav: {low: 0.75, high: 1.50}    # ng/mL/yr
+
+benign_correction:
+  ipss_min: 20
+  prostate_volume_cc_min: 60
+
+permissible:
+  prostate_volume_cc_max: 60
+
+# Prior-negative track only. The reference biopsies every previously-sampled man
+# with a suspicious lesion up to age 73 and declines at 79; 75 is also the line
+# the procedural-risk reading already uses. At or above it a suspicious lesion
+# no longer earns automatic tissue.
+prior_negative_age_max: 75
+
+# Largest lesion dimension, mm, keyed by PI-RADS category.
+lesion_size_mm:
+  3: {low_max: 10, grey_max: 12}
+  4: {low_max: 10, grey_max: 14}
+  5: {low_max: 10, grey_max: 20}
+
+concordance:
+  expected_pirads: {1: [1, 2, 3], 2: [3, 4], 3: [3, 4, 5]}
+  flip_votes_required: 2
+
+# fh is `noted` in 64/91 reference cases, but family_history appears in 0 of
+# their reveal sequences. Weighting it costs section grounding (0.05); revealing
+# it costs tool precision (0.15). Default keeps the weight, skips the reveal.
+weight_fh: true
+
+# --- Confidence assessor -------------------------------------------------
+# Derived by reading all 33 non-clear reference rationales; see
+# docs/agentic_plan.md section 5b. Measured on the 91 labelled cases:
+# ordinal 0.7363 (all-clear) -> 0.7692, quadratic kappa 0.0 -> 0.3962.
+confidence:
+  grey_zones_for_borderline: 2   # how many grey readings make the case borderline
+  conflict_age: 75               # suspicion against the benefit window
+  conflict_comorbidity_count: 3  # suspicion against competing mortality
+  # ...but neither of those two may overrule MAXIMAL suspicion in a man young
+  # enough to be treated. EAU's evidence summary puts csPCa detection at 83% for
+  # PI-RADS 5 against 55% at PI-RADS 4, so at 5 the indication is not what is in
+  # doubt, and a benefit-window worry has nothing left to make shared. Same
+  # asymmetry the 2026-09-11 age-gate guard applies on the decision side, and the
+  # same line the frozen policy's `task1.risk_is_outranked` reads.
+  # ⚠️ Restated here rather than imported from task1_policy.yaml, so retuning
+  # either policy cannot move the other silently.
+  # ⚠️ Scoped OFF the established-cancer track, exactly as the frozen rule is:
+  # there the question is re-grading, and a PI-RADS 5 does not settle what the
+  # earlier biopsy found. Applied there too it gives one more exact match (63)
+  # and a WORSE kappa (0.4114 against 0.4483) on the same ordinal score -- do not
+  # widen it. It outranks BOTH the benefit window and a grey biochemistry, so it
+  # runs ahead of the conflict and ambiguity rungs rather than inside one.
+  # Measured over the 91, decisions unchanged at 79: exact 58 -> 61, ungated
+  # 0.7692 -> 0.7857, gate-passed 0.7532 -> 0.7727, quadratic kappa 0.4183 ->
+  # 0.4483, distribution 53/24/14 -> 56/21/14 against a reference 58/18/15. It
+  # fires on 3 cases, +3/-0.
+  # ⚠️ All three sit in the dev half (dev 0.7308 -> 0.7692, holdout unchanged),
+  # so unlike the free-PSA rung it does NOT win on both halves independently. It
+  # rests on the mechanism, not on the split.
+  settled_below_age: 75
+  # A PSA with a BENIGN EXPLANATION does not corroborate the imaging. Catalona's
+  # line: above 25% free PSA the cancer probability is ~8%, and the fraction is
+  # raised by BPH bulk rather than by tumour. Read only in the established-cancer
+  # track, where the question is whether THIS encounter has a new tissue
+  # question; the biochemistry is then carrying no case of its own and the
+  # answer is a shared one rather than a settled one.
+  free_psa_benign_pct: 25.0
+  # ⚠️ %free PSA lives ONLY in laboratory_results (0/195 prompts, 3/195 other
+  # clinical sections), so the rung needs a reveal. This flag is the A/B arm: it
+  # fetches the labs on the 33 of 91 cases where the rung could change the label,
+  # BEFORE the specialists, so the biochemical assessor reads the free fraction
+  # too and the note may quote it. Replayed against a real run's reveal sets,
+  # tool 0.9589 -> 0.9030 (-0.0084 at weight 0.15) against confidence +0.0253
+  # (+0.0051 at 0.20) -- net -0.0033, because the agent reveals ONE section on 56
+  # of 73 cases and an extra one halves that case's precision. Section grounding
+  # buys nothing back: section_s3-labs is only ever SECONDARY.
+  # ⚠️ It therefore ships only if the rationale pays the difference: +0.0165 on
+  # the gate-passed rationale mean, ~+0.046 over the 33 cases it touches. Score
+  # a judge-on MCP run with this true against the same run with it false.
+  reveal_labs_for_free_psa: false
+
+# Which rungs of the decision ladder the critique may challenge.
+#
+# ⚠️ OPEN POINT. Narrowing this to the rungs where the rules beat the agent
+# looked right on paper and lost in the run: [hard_gate, tally] measured
+# 73/91 and ranking 0.7452, against 75/91 and 0.7680 for enforcing everything
+# (runs v10 and v9). The simulation that predicted 75 assumed the agent adopts
+# the rule whenever challenged, and built that on an earlier run's outputs --
+# neither held. Enforcing all rungs is what is measured best, so it ships;
+# a better-targeted version is worth finding, not worth guessing at.
+decider: graph        # `adjudicator` restores the pre-graph LLM decision path
+enforced_rungs: [hard_gate, tally, lesion, discretionary, prior_neg_gate, pirads_high]
+
+# --- Task 2: post-biopsy management ---------------------------------------
+# Thresholds from docs/updated_task_2_policy, with the three corrections that
+# took the ladder from 61/72 to 65/72 on the labelled set.
+task2:
+  psa_ceiling: 20.0             # systemic risk ceiling: staging and treatment
+  psa_unfavourable: 10.0        # unfavourable-intermediate feature
+  psad_unfavourable: 0.15
+  psav_unfavourable: 2.0
+  ipss_severe: 20               # severe obstruction; 18 -> 63/72, 25 -> 64/72
+  luts_psad_ceiling: 0.20       # the raised PSA must be the gland's, not the tumour's
+  pattern4_unfavourable_pct: 10
+  # ---- what each variable is weighted FOR, on this case -------------------
+  # An incidental cT1c tumour adds nothing to the discussion; a palpable or
+  # visible one changes the staging and the treatment options. Reference
+  # important/decisive rate: cT1 35%, cT2 59%, cT3+ 100%.
+  stage_palpable_from: 2
+  # Competing risk only bears when there is comorbidity to weigh. ⚠️ Moving this
+  # to 4 looks right in aggregate and gains on dev while losing on test -- the
+  # 2-3 band is too close to a coin flip to move the line on. Left at 2.
+  comorbidity_burden: 2
+  # Where the grade is high enough that the pattern mix is what the plan turns
+  # on, both Gleason patterns are read rather than merely recorded.
+  gleason_pattern_from: 3
+  # The grade SETTLES management at its two ends and opens the question in the
+  # middle. Reference: ISUP 1 decisive 12/19; ISUP 2 important 11 vs decisive 1;
+  # ISUP 3 important 4 vs decisive 1. Reading the boundary as a bare `>= 3`
+  # instead measured 0.8475 -> 0.8442 on the variable weights.
+  grade_settles_below: 2
+  grade_settles_from: 4
+  # A PSA past the systemic ceiling on a negative biopsy is the entire reason
+  # surveillance continues rather than stopping -- "Rebiopsy" at 35.0, "Repeat
+  # PSA in 3 months" at 21.0.
+  psa_decisive_no_cancer: 20.0
+  # Above this the PSA is a statement about disease BURDEN rather than risk
+  # class: it drives metastatic staging and says what the grade does not.
+  psa_decisive_burden: 100.0
+  # ...and below the EAU intermediate line a case already high risk on its grade
+  # gains nothing from its PSA, and the reference stops weighting it.
+  psa_inert_high_risk: 10.0
+  # ⚠️ Enforce ALL of them here, unlike Task 1. The direction follows from which
+  # is better: on Task 2 these rules score 65/72 against the agent's 62, so the
+  # critique is worth applying everywhere; on Task 1 the agent beats its own
+  # rules, which is why narrowing was even considered there. `grade_gate` and
+  # `ceiling` see zero disagreements in practice -- `intermediate` and `luts`
+  # are what move, +3/-0 and +1/-0 respectively.
+  enforced_rungs: [grade_gate, ceiling, intermediate, luts]

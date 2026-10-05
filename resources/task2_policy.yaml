@@ -1,0 +1,936 @@
+# Task 2 -- which management strategy?
+#
+# Three questions, asked in order:
+#
+#   1. risk       what is this cancer?            -> ISUP, PSA and cT jointly
+#   2. candidacy  will he live long enough to
+#                 benefit from treating it?       -> age and competing illness
+#   3. need       given both, what does he need?  -> plus symptom burden
+#
+# Question 1 is the EAU/D'Amico risk stratification, which is a joint function
+# of grade, PSA and clinical stage -- not grade alone. On the 72 labelled cases
+# grade alone happens to give the same answer, because no ISUP 1 patient has
+# PSA >= 20 or cT3+; the joint form is used anyway because a low-grade cancer
+# with a PSA of 40 is not a surveillance patient and this cohort simply does
+# not contain one.
+#
+# Question 2 is the axis the guidelines put beside risk and that the previous
+# policy had no representation of at all: watchful waiting is what you offer a
+# man whose cancer is not what will limit his life. Without it the fourth class
+# is unreachable by construction.
+#
+# A variable's reported weight is its role on the branch taken, as in Task 1.
+
+# ---- stage 1: what is this cancer? --------------------------------------
+risk:
+  # No cancer confirmed. The diagnostic pathway continues -- this is
+  # surveillance of a *suspicion*, not of a cancer.
+  none: continued_surveillance
+  # Confirmed low-risk disease: the formal AS protocol.
+  low: active_surveillance
+  # Intermediate and high risk: treatment is on the table.
+  # High risk additionally states that staging must exclude metastatic disease
+  # first -- 7 of the 12 reference rationales on that branch say so outright,
+  # and EAU requires metastatic screening
+  # with PSMA-PET/CT, or cross-sectional imaging plus bone scan, at this level.
+  # ⚠️ ONTOLOGY LIMIT, not a rule bug: staging genuinely CAN change the answer,
+  # because a man found to be M1 moves to the systemic pathway -- and the
+  # four-class output space has no category for newly identified metastatic
+  # disease. Task 2 asks for the intended strategy before staging, so
+  # `active_treatment` pending staging is the correct answer here; the
+  # limitation is in the label space and cannot be fixed in this policy.
+  intermediate: active_treatment
+  high: active_treatment
+  # Any single high-risk feature formally makes the case high risk. The narrow
+  # provisional discordance branch below is a challenge-specific exception to
+  # immediate treatment, not to this classification.
+  #
+  # ⚠️ This block used to say we "deliberately do not escalate ISUP 1 with
+  # PSA 10-20", because all 4 such men here are labelled active_surveillance.
+  # A consultant urologist rejected that outright (2026-08-29): it reproduces a
+  # management choice by bending the definition of risk. Classify the cancer
+  # correctly, THEN ask whether surveillance is still appropriate. GG1 with
+  # PSA 10-20 *is* favourable-intermediate disease under current EAU
+  # classification -- and favourable-intermediate does not imply treatment,
+  # because EAU offers AS to selected intermediate-risk men. Same four
+  # decisions, arrived at honestly; see `surveillance:` below.
+  low_isup_at_most: 1
+  # EAU's intermediate band opens at PSA 10. Below every high-risk feature, a
+  # PSA at or above this makes the case intermediate rather than low.
+  intermediate_psa_from: 10.0
+  # Favourable-intermediate is ISUP <= 2 carrying at most one intermediate-risk
+  # factor. ⚠️ The third EAU factor, cT2b-c, is unobservable here: of 153 cases
+  # the stages are cT1c 110, cT2a 23, bare cT2 10, cT2c 1, cT3x 5, cTx 4 -- and
+  # *no* ISUP 2 case is cT2b or cT2c, so the factor never fires. Recorded as a
+  # limitation rather than patched. A stage we cannot confirm is not counted as
+  # favourable.
+  favourable_isup_at_most: 2
+  favourable_factors_at_most: 1
+  high_isup_from: 4
+  # Exclusive boundary: EAU defines PSA >20 as high risk; PSA exactly 20 stays
+  # in the 10-20 favourable/unfavourable-intermediate classification.
+  high_psa_from: 20.0
+  high_stage_from: 3
+  # The ISUP 2 band is a shared decision -- "AS is an option in carefully
+  # selected patients" -- and nothing available says who is selected. The
+  # criteria that would (positive-core count, pattern-4 percentage, core
+  # involvement, tumour volume) appear in **0 of 153** Task 2 pathology
+  # reports, measured 2026-08-28. An LLM read of the reports and notes
+  # recovers management intent, patient preference, histological stability
+  # and cribriform/IDC status on 72/72 cases, but inside the band those sit
+  # at 25% AS-precision against a 17% base rate, and the best conjunction of
+  # them flips 4 cases 2-for-2 -- exactly break-even. See
+  # `scripts/try_task2_signals.py`. Do not re-derive this.
+  # 3 of the 7 favourable-intermediate cases here are surveillance and 4 are
+  # not.
+  # ⚠️ CONFIDENCE ON THIS BRANCH IS UNGROUNDED, 2026-09-02. It stays `clear`,
+  # but the old defence -- "the clinicians call this band clear 13 times out of
+  # 18" -- is a count, not a reason, and it contradicted `modality_open`, which
+  # lowered confidence for exactly the openness this line says to ignore. That
+  # rule is now removed. What should decide this branch is the EAU strength
+  # rating for treating unfavourable-intermediate disease, and that table is NOT
+  # in `resources/eau_2026/` (see the confidence block below). `clear` is the
+  # current default, not a grounded answer. Do not defend it with the count.
+  shared_decision_isup: 2
+
+# ISUP 1 always remains on active surveillance. Two or more strongly
+# discordant channels lower confidence, as do severe urinary symptoms; neither
+# changes the cancer-management arm.
+isup1:
+  discordant_psa_above: 10.0
+  discordant_pirads: 5
+  discordant_stage_from: 2       # cT2a or higher
+  discordances_for_borderline: 2
+  borderline_ipss_above: 20      # strict: IPSS 20 itself does not fire
+
+# A positive biopsy without a usable grade cannot be risk-stratified. There is
+# no such case in the 72 labelled records, so this is a safety rule rather than
+# a fitted threshold. Keep the patient on the diagnostic/management pathway
+# while pathology is clarified; do not invent intermediate-risk disease.
+ungraded_positive:
+  decision: continued_surveillance
+  confidence: uncertain
+
+  # ---- an unreadable grade does not erase a high-risk PSA (2026-09-03) ---
+  # A positive biopsy whose grade cannot be read is still a positive biopsy,
+  # and the grade can only raise the risk class -- never lower it below what a
+  # PSA over the EAU high-risk line already establishes. So "obtain the grade
+  # first" stops being a management answer once the PSA is high.
+  #
+  # UNLESS the record explains the PSA some other way. PSA is not
+  # cancer-specific: prostatitis, infection, instrumentation and retention all
+  # raise it, and EAU asks for a repeat under standardised conditions before an
+  # elevation is treated as a risk feature. When `policy._psa_confounder` finds
+  # such a statement, the elevation is not evidence yet and the case holds on
+  # surveillance instead -- the same logic as
+  # `low_grade_high_psa_discordance`, which already names infection and
+  # prostatitis as things to exclude. This branch READS that exclusion instead
+  # of only recommending it.
+  #
+  # ⚠️ UNTESTABLE on the 91/72 labelled cases: every labelled Task 2 case
+  # carries a grade, so GRADE_NOT_RECORDED fires 0/72 and this changes no
+  # labelled decision. It is measured on the external dev cohort instead --
+  # the mirror image of the LUTS switch's evidence, and it should be read with
+  # the same caution. Dev: 31/36 -> 34/36.
+  # ⚠️ Those dev rows lack a grade only because the CSV was reconstructed from
+  # evaluator rationales, not because the records lack one -- so this rule is
+  # aimed at a data gap that may not exist in the hidden phase. It is written
+  # to be clinically right if it ever does.
+  high_risk:
+    psa_above: 20.0            # the EAU high-risk line, as in `risk`
+    psad_from: 0.5             # a density this high is not a benign gland
+    decision: active_treatment
+    confidence: uncertain      # the grade is still missing; say so
+    confounded_decision: active_surveillance
+    confounded_confidence: uncertain
+
+# ---- the eligibility layer: is surveillance still on the table? ---------
+# Risk classification says what the cancer IS. This says what the man NEEDS.
+# Keeping them apart is the whole point of the 2026-08-29 review: a policy that
+# reclassifies the disease in order to reach a management answer cannot
+# generalise, however well it reproduces this cohort.
+#
+# ISUP <= 1 is offered surveillance whether it classifies as low or as
+# favourable-intermediate risk. ISUP 2 defers to tumour burden -- and this is
+# where the layer stops, because the burden is not in the record.
+#
+# ⚠️ CORPUS INVENTORY, all 153 Task 2 pathology and radiology reports
+# (2026-08-29). Every variable the guideline AS criteria are built from is
+# ABSENT -- not negated, never written:
+#     % Gleason pattern 4 .......... 0/153
+#     positive cores ............... 0/153
+#     total cores sampled .......... 0/153
+#     % cancer involvement per core  0/153
+#     max cancer core length (mm) .. 0/153
+#     tumour volume ................ 0/153
+#     lesion count / multifocality . 0/153
+# No extraction effort recovers these; it needs an upstream data change.
+#
+# ⚠️ What we DO have does not substitute for them.
+#   - cribriform: present (50 positive of 147 mentions) and rated highly by the
+#     reviewer, but inside the ISUP 2 band surveillance runs 20% among
+#     cribriform-POSITIVE cases against 22% NEGATIVE, on a 19% base rate -- no
+#     signal. And the case the reviewer reads as the clearest surveillance
+#     candidate in the band is cribriform-POSITIVE. Using it as
+#     an AS exclusion moves us AWAY from the reference. This is a mismatch
+#     between the dataset's decision-generating process and idealised guideline
+#     management, and the dataset wins here.
+#   - intraductal 1/18 labelled, ECE 1/18, SVI 0/18 -- too rare to act on.
+#   - MRI lesion size: present on 42/45 but templated at 12 mm on nearly every
+#     case, so it has no usable variance.
+#   - ⚠️ PRIAS, TESTED 2026-09-02, LOST. The inventory above is of *tumour
+#     burden* fields, and it wrongly implied no guideline criteria exist at all.
+#     They do: `eau_2026/treatment_2026.txt` quotes the PRIAS entry criteria --
+#         cT <= 2; ISUP GG1, or GG2 WITHOUT invasive cribriform growth and
+#         intraductal carcinoma; PSA <= 20 ng/mL; PSA density < 0.25 ng/mL/cc
+#     and we hold four of those five: cT, PSA, PSAD and cribriform/IDC status.
+#     Only the GG2 core-count arm (<= 50% of systematic cores) is missing.
+#     Offering AS on the other four fires on 9 of the 18 ISUP-2 cases and moves
+#     decisions +2/-5, ranking 0.7656 -> 0.7302. The missing core-count arm is doing the real selection
+#     work: without it the criteria over-admit. This is a sharper statement of
+#     the same conclusion -- the band is unreachable because ONE named field is
+#     absent, not because no criteria exist. Do not re-derive it.
+#   - PI-RADS: separates this band perfectly (PI-RADS 5 -> 7/7 treatment) and
+#     was priced as an explicitly corpus-specific fallback. REJECTED: gating
+#     favourable-intermediate on PI-RADS <= 4 gains 3 cases and loses 3 --
+#     identical accuracy (0.8750) and identical error count for +0.0006
+#     ranking. PI-RADS <= 3 is worse (0.8611). A proxy that buys nothing on the
+#     data it was fitted to is not worth the generalisation risk the reviewer
+#     warned about.
+#   - management intent, patient preference and histological stability were
+#     read by LLM on 72/72 and every rule lost, -0.024 to -0.036 ranking.
+#     See `scripts/try_task2_signals.py`. DO NOT RE-DERIVE ANY OF THIS.
+#
+# So the layer is real, named and testable, and currently has nothing to act
+# on. ISUP 2 keeps its default -- treatment, the safer arm -- and says so.
+surveillance:
+  # What the eligibility layer recommends when it says yes. Deliberately NOT
+  # read from `risk.low`: the decision belongs to this layer, and a favourable
+  # intermediate-risk man reaching surveillance must not have to borrow the
+  # low-risk row to do it. That borrowing is the conflation being removed.
+  decision: active_surveillance
+  offer_isup_at_most: 1
+  # The fields a burden test would read, named so the seam is one edit away if
+  # the data ever carries them.
+  burden_fields: [cores_positive, cores_total, pattern4_pct, core_involvement_pct,
+                  max_core_length_mm, tumour_volume_ml, lesion_count]
+  # Unset: the seam cannot fire. Absence of evidence is not evidence of low
+  # burden, so "no burden data" means surveillance is NOT offered.
+  burden_thresholds: null
+
+  # ISUP 2 defaults to treatment. Any one of these findings makes the profile
+  # unfavourable before the remaining AS-entry criteria are considered.
+  gg2_unfavourable:
+    psa_above: 10.0
+    pirads_unfavourable: 5
+    stage_rank: 2
+    stage_substage_at_most: a     # only cT2b or higher is unfavourable
+
+  # ---- the GG2 stage ladder (2026-09-03) --------------------------------
+  # The burden fields are absent, but clinical stage is not, and stage is the
+  # axis the guidelines put beside grade. cT1 is impalpable organ-confined
+  # disease; cT2a-b is palpable but unilateral and organ-confined; cT2c and
+  # above is bilateral or extracapsular. EAU/PRIAS admit GG2 to surveillance
+  # WITHOUT invasive cribriform or intraductal growth, at PSA <= 20 and
+  # PSAD < 0.25 (`eau_2026/treatment_2026.txt`) -- so on cT1 the recorded
+  # fields already carry four of the five entry criteria and the stage speaks
+  # for the fifth.
+  #
+  # cT2b and above makes the profile immediately unfavourable. cT2a can earn
+  # surveillance through the existing stable-trajectory rung. A missing/cTx
+  # stage is not adverse evidence: MRI carries the assessment in its absence.
+  #
+  # ⚠️ Every precondition must be POSITIVELY STATED -- an unmentioned
+  # cribriform status, a missing PSAD, cTx, or a stability sentence covering
+  # only a "single available timepoint" all fail it. That is the whole
+  # difference from the PRIAS rule tested on 2026-09-02, which admitted on the
+  # four recorded entry fields alone and went +2/-5: all five losses either
+  # upgraded histologically, never had stability written, or carried a
+  # velocity over the line.
+  stable_favourable_gg2:
+    isup: 2
+    stage_at_most: 2            # cT2a is favourable; cT2b+ is not
+    stage_without_trajectory_at_most: 1   # cT1: stage alone suffices
+    substage_at_most: a         # cT2b and above is unfavourable -- treat
+    psa_at_most: 10.0           # PSA >10 is immediately unfavourable
+    pirads_at_most: 4           # PI-RADS 5 is immediately unfavourable
+    psad_below: 0.25            # PRIAS entry criterion
+    psav_below: 2.0             # d'Amico 2004 velocity threshold
+
+  # ---- GG2 that is not characterised yet (2026-09-03) -------------------
+  # cTx means the local extent was never assignable, and a report stating a
+  # single biopsy timepoint means the grade rests on one sample. Treating on
+  # that record commits an irreversible decision on two unconfirmed variables.
+  # Surveillance here is "keep him under review while we stage and re-biopsy",
+  # which is what the reference asks for; the density and velocity lines are
+  # the same two used above and only assert there is no reason to hurry.
+  # ⚠️ Fires on 1 of the 72 -- only 2 cases are cTx and the other is
+  # ISUP 4. Powered by mechanism, not by count.
+  uncharacterised_gg2:
+    isup: 2
+    psad_below: 0.25
+    psav_below: 2.0
+
+# ---- discordant GG1 pathology and a high-risk PSA -----------------------
+# EAU still classifies PSA >20 ng/mL as high risk, even with ISUP GG1. The
+# challenge reference nevertheless keeps two such men on active surveillance
+# while asking clinicians to resolve the contradiction (repeat/standardise PSA,
+# exclude prostatitis, review or repeat pathology, and stage with PSMA-PET/CT
+# or conventional imaging). This is therefore a PROVISIONAL management branch,
+# not an EAU risk reclassification. It is deliberately restricted to GG1 and
+# organ-confined/unknown cT stage; GG2+, cT3+ and established metastatic disease
+# remain outside it.
+low_grade_high_psa_discordance:
+  isup_at_most: 1
+  psa_above: 20.0
+  stage_at_most: 2
+  decision: active_surveillance
+  confidence: borderline
+  # Multiple/severe contradictions make the provisional answer uncertain.
+  # These lines distinguish the two observed hidden cases (PSA 28/PI-RADS 4
+  # versus PSA 47/PI-RADS 5/PSAD 0.65) without changing their management arm.
+  uncertain_psa_from: 40.0
+  uncertain_pirads_from: 5
+  uncertain_psad_from: 0.50
+  severe_confidence: uncertain
+
+# ---- stage 2: will he live long enough to benefit? ----------------------
+# Watchful waiting is for a man whose cancer is not what will limit his life.
+# EAU frames this as life expectancy under ten years; there is no
+# life-expectancy field, so age plus a substantial competing-illness burden
+# stands in for it.
+#
+# ⚠️ This is a LIFE-EXPECTANCY STAND-IN, not a clinical threshold, and the
+# distinction matters (reviewer, 2026-08-29). Four mild conditions can carry a
+# far better prognosis than one severe one -- osteoarthritis, hypertension, BPH
+# and a previous abdominal operation are not heart failure, severe COPD, CKD4
+# and dementia. EAU wants individual life expectancy and health status, scored
+# with G8 or the Clinical Frailty Scale, and would set the line at a <10-year
+# expectancy. None of those inputs exists in this record, so the stand-in is
+# necessary -- but it must be read as one, and replaced the moment the data
+# permits.
+# ⚠️ Say that in comments only. `form_fill._INTERNAL_LANGUAGE` rejects the word
+# "proxy" in emitted prose, so the rationale states the clinical reason instead.
+# WARNING: only 2 of the 72 labelled cases are watchful_waiting, so this
+# threshold CANNOT be fitted and is not. It is the conventional age at which
+# curative treatment stops being offered by default, paired with a real
+# comorbidity burden. It recovers one of the two labelled cases; the other
+# (age 70, one comorbidity) is not a life-expectancy case by any reading --
+# its rationale doubts the diagnosis instead.
+# 📎 EAU ANCHOR, retrieved 2026-09-02 (`eau_2026/treatment_2026.txt`, 6.1.5):
+#   "Use individual life expectancy, health status and comorbidity in PCa
+#    management."                                                    | Strong
+#   "Use the Geriatric 8 (G8), mini-COG and Clinical Frailty Scale tools for
+#    health status screening."                                       | Strong
+#   "Offer adapted treatment or watchful waiting to patients with irreversible
+#    impairment."                                                    | WEAK
+# The first two say the axis is right and that our stand-in stands in for an
+# assessment EAU *strongly* recommends performing and we cannot perform. The
+# third is why `confidence` here is `borderline`: EAU's own recommendation for
+# watchful waiting is WEAK, so a weak recommendation is what we report.
+# ⚠️ The labels disagree: both reference watchful_waiting cases are `clear`, and
+# setting this to `clear` would gain +0.0008 ranking. It is left at `borderline`
+# because the guideline grades the recommendation Weak. This is the strength
+# rating winning over the count, deliberately, at n=1.
+candidacy:
+  elderly_from: 75
+  comorbidity_burden: 4
+  decision: watchful_waiting
+  confidence: borderline
+
+# ---- severe obstruction alongside low-grade disease ---------------------
+# PROVISIONAL: severe LUTS is an indication to treat the bladder outlet, not
+# the cancer. A man may remain on active surveillance while receiving medical
+# BPH treatment, TURP, HoLEP or enucleation. Radical prostatectomy becomes an
+# option only after the cancer independently warrants treatment or the patient
+# chooses definitive cancer therapy after counselling.
+#
+# 💡 The labels agree with her once the rationales are read. The rule looked
+# 3-for-4, but there is NO clean case where severe LUTS itself drove
+# definitive treatment: two of the three treated cases are one arm of a stated
+# discussion (surveillance plus LUTS treatment vs prostatectomy, both
+# `borderline`), and the third turns on under-sampling in a PI-RADS 5 / ISUP 1
+# discordance. The fourth severe-LUTS case is under surveillance.
+#
+# The released labels still say treat in those three, so enabling separation
+# moves decision accuracy 66/72 -> 63/72.
+#
+# ⚠️ n=1. The gland ceiling moves only one case (104 mL; the other three are
+# 47-63 mL), so every ceiling from 64 to 104 selects the same single case. The ceiling is
+# retained for the explanatory distinction between outlet procedures, although
+# it no longer changes the cancer decision while the provisional switch is off.
+symptoms:
+  severe_ipss: 20
+  gland_ceiling_ml: 80
+  # ---- and only while the cancer question is quiescent --------------------
+  # ⚠️ ADDED 2026-09-08, owner lifted the freeze for it.
+  #
+  # The switch's whole claim is that this man needs outlet surgery for BENIGN
+  # disease anyway, so the operation that also removes the cancer is the better
+  # single operation. That claim presupposes the raised PSA is attributable to
+  # the gland rather than to tumour -- and PSA density is exactly the reading
+  # that settles which. Below this line the density carries no cancer case of
+  # its own, so the symptoms are free to act as the tiebreaker. At or above it
+  # the density carries the case, the cancer question is NOT quiescent, and the
+  # management must be decided on cancer grounds rather than on symptoms.
+  #
+  # The reference says the same thing on the two cases the switch genuinely
+  # drives (psad 0.084 and 0.121): both are framed as a discussion, not an
+  # indication, and both are labelled `borderline`. A third case (psad 0.111)
+  # is carried by this branch but reasoned by the reference on under-treatment
+  # risk, so the switch is right there for the wrong reason. Recorded as an
+  # audit item, not patched.
+  #
+  # 0.20 is NOT fitted to these cases: it is the line at which a density starts
+  # to carry suspicion on its own, which `task1_policy.yaml -> suspicion.
+  # psad_likely` already uses for the same reading. It is restated here rather
+  # than imported, because coupling the two tasks' keys would move this gate
+  # silently if either were ever retuned.
+  #
+  # ⚠️ A missing density does NOT admit. This is a positive precondition -- the
+  # PSA must be SHOWN to be bulk-explicable -- not an exclusion to be earned,
+  # so silence blocks the switch. (psad is recorded on 153/153, so this changes
+  # nothing today.) Contrast `gland_ceiling_ml` directly above, which IS an
+  # exclusion and where an unknown gland therefore does not block.
+  #
+  # Measured 2026-09-08, all 72 labelled: unchanged at 69/72 -- the three cases
+  # the switch wins all sit at 0.084-0.121 and keep firing.
+  bulk_explicable_psad_below: 0.20
+  # ⚠️ RE-ENABLED 2026-09-03 by the owner, after being removed on 2026-09-02.
+  # The reason it lacked then is now stated and is in the code above: the rule
+  # fires ONLY while one operation can treat both problems (`gland_ceiling_ml`),
+  # so the claim is not "symptoms justify cancer therapy" but "this man needs
+  # outlet surgery anyway, and surgery that also removes the cancer is the
+  # better single operation". Confidence is `borderline`, matching the
+  # reference, which frames these cases as a discussion.
+  # Measured on all 72 (2026-09-03): +2/-0.
+  # ⚠️ UNTESTABLE on the external dev cohort, now shown rather than assumed
+  # (2026-09-03). The CSV has no IPSS *column*, but 6 of its 36 Task 2 rows do
+  # mention LUTS/BPH in `other_clinical_context` -- so "no IPSS at all" was
+  # wrong. Feeding those in changes nothing: 31/36 with the switch off and on,
+  # and 31/36 again in a stress run that assumes IPSS 30 on ALL SIX. None can
+  # reach the branch; all return before stage 3 (no grade recorded, ISUP 3,
+  # or a low-grade/high-PSA discordance). So this is "dev cannot test", which
+  # CLAUDE.md ranks below "dev confirms" -- it is NOT "dev contradicts".
+  # One line to revert.
+  changes_cancer_decision: true
+  decision: active_treatment
+  confidence: borderline
+
+# ⚠️ WE ARE DEPARTING FROM A STRONG EAU RECOMMENDATION. Stated plainly because
+# leaving the switch quietly `false` is the same failure as shipping a rule with
+# only a number, pointing the other way.
+# 📎 `eau_2026/treatment_2026.txt`, 6.2.1.c:
+#     "Exclude patients with cribriform or intraductal histology on biopsy from
+#      AS."                                                            | Strong
+# Measured on all 72 with the exclusion ON (2026-09-02): decisions +1/-4 --
+# the four losses are all labelled active_surveillance despite positive
+# cribriform/IDC. Ranking 0.7656 -> 0.7257,
+# important/decisive F1 0.7089 -> 0.6954. 25 of the 72 cases are cribriform/IDC
+# positive, so this is well-powered, not an n=1 artefact.
+# The reason for the departure, and it is a reason about the DATA and not about
+# the guideline: this cohort's decision-generating process does not apply the
+# exclusion, so enforcing it scores our disagreement with the reference rather
+# than better medicine. The guideline is right; the labels are what we are
+# scored against. ⚠️ This is exactly the case for NOT deploying the policy
+# clinically without the review in CLAUDE.md's open item 4 -- a clinical
+# deployment should turn this ON.
+# The parser (`policy._has_adverse_as_histology`) and the policy seam are
+# implemented, so enabling it after hidden-phase review needs no code change.
+adverse_histology:
+  excludes_surveillance: false
+
+  # ---- incoherent grade + independently demonstrable disease -----------
+  # ADDED 2026-09-03, from a case-by-case review.
+  #
+  # The clinical reason, stated before the number. A biopsy grade can only err
+  # in one direction: it can under-sample the highest-grade focus, but it does
+  # not invent grade that is not there. So "the grade may be wrong" always
+  # means "the true grade may be higher", and the only question is whether to
+  # believe this particular grade.
+  #
+  # Cribriform architecture reported alongside Gleason 3+3 is a report at war
+  # with itself -- cribriform is a pattern 4 morphology by definition, so the
+  # specimen contains something the assigned grade denies. That makes the grade
+  # INCOHERENT, not merely unverified.
+  #
+  # ⚠️ Incoherence alone is NOT an indication to treat, and the labels are
+  # emphatic about it: of the five ISUP 1 cases reporting cribriform, four are
+  # `active_surveillance`, and their reports flag the contradiction
+  # explicitly. The pathologist names the problem and the clinician still
+  # surveils. This is why the blanket `excludes_surveillance` exclusion above
+  # loses 4 cases and stays off.
+  #
+  # What changes the answer is whether significant disease can be demonstrated
+  # WITHOUT relying on the tissue at all. When the lesion is PI-RADS 5 and the
+  # tumour is palpable (cT2+), the biopsy is the only item in the record still
+  # claiming low-risk disease, and it is the least reliable one. Re-biopsy buys
+  # nothing a re-read would not: you would be re-sampling a lesion the imaging
+  # and the finger both already call significant. Treating is not jumping ahead
+  # of the tissue; it is declining to be reassured by a grade the rest of the
+  # record contradicts. The reference reasons the same way on the one case
+  # this fits, citing the risk of under-treatment, and backs it in the
+  # weights by demoting the biopsy grade.
+  #
+  # Where a re-biopsy DOES belong, and why this branch is narrow: when the
+  # grade is unverified or incoherent but nothing outside the tissue is hard --
+  # no palpable disease, PI-RADS <= 4. Then you have no information, you go and
+  # get it, and nothing about his management changes today. That is what the
+  # cohort does 32 times out of 33: every other rationale calling for a biopsy
+  # keeps the patient in the surveillance class he was already in (16 AS, 11 CS,
+  # 2 WW). A biopsy is not a treatment.
+  #
+  # ⚠️ n=1 ON THE LABELLED SET. One case satisfies the conjunction, and the four counter-cases above are excluded by the imaging
+  # and stage gates, not by anything measured. Shipped on the mechanism and the
+  # reference's own reasoning, with the support explicitly recorded as one case.
+  # Fires on 0 of 36 external dev rows -- the CSV carries no pathology text --
+  # so the dev cohort can neither confirm nor contradict it.
+  incoherent_grade_treats:
+    enabled: true
+    # Only where the grade would otherwise route to surveillance.
+    grade_at_most: 1
+    # Independently demonstrable disease, both required.
+    pirads_from: 5
+    stage_from: 2
+    decision: active_treatment
+    confidence: clear
+
+# ---- how confident are we, and why -------------------------------------
+# ⚠️ REBUILT 2026-09-02. `confidence` is our confidence in OUR DECISION -- one of
+# the four management classes -- and it is now keyed to the strength EAU gives
+# that action, not to a fitted correlate.
+#
+# What was removed, and why. `modality_open` dropped `clear` -> `borderline`
+# when the gland was >= 80 mL, justified as "*which* treatment is open". The
+# reference labels falsify that justification outright: four gate-passed cases
+# are labelled `clear` while their rationale explicitly describes RP-vs-RT
+# shared decision-making. An open modality is therefore compatible with `clear`. RP and RT are both
+# `active_treatment`: they are the SAME answer, so choosing between them cannot
+# make our answer less certain. The rule survived only because four large-gland
+# cases happened to co-occur with `borderline`.
+# ⚠️ And it was never testable where it counts: `gland_volume_ml` is present on
+# **0 of 36** Task 2 rows in `baseline/external_data/` -- the rule could not fire
+# on a single development-cohort case. Per the top-of-CLAUDE.md rule, "dev cannot
+# test this rule" is the weakest evidence there is, and this one had nothing else.
+# Removal costs ranking 0.7656 -> 0.7625 (confidence 0.9286 -> 0.8968), all of it
+# on four cases. No decision moves. Do not reinstate it.
+#
+# The replacement is the EAU strength rating for the recommended action, cited
+# per branch from `resources/eau_2026/treatment_2026.txt`:
+#
+#   branch                                EAU anchor                  strength   -> conf
+#   LOW_RISK_CANCER                       6.2.1.c "Offer AS as         Strong      clear
+#                                         standard of care to all
+#                                         low-risk disease"
+#   FAVOURABLE_INTERMEDIATE_SURVEILLANCE  6.2.1.c "...and selected     Strong      clear
+#                                         patients with favourable
+#                                         intermediate-risk disease"
+#   TREATMENT_WOULD_NOT_BENEFIT           6.1.5 "Offer adapted         WEAK        borderline
+#                                         treatment or watchful
+#                                         waiting to patients with
+#                                         irreversible impairment"
+#   LOW_GRADE_HIGH_PSA_DISCORDANCE        no EAU branch fits; the       --         borderline
+#                                         record contradicts itself                /uncertain
+#
+# ✅ THE MISSING TABLES WERE RETRIEVED ON 2026-09-04, and they do NOT ground
+# these branches. Fetching the chapter with curl instead of WebFetch (2.6 MB,
+# over the fetch window -- nothing paywalled) got all 14 strength tables into
+# `resources/eau_2026/treatment_2026.txt`. Two findings:
+#   1. THERE IS NO RP OR RT RECOMMENDATION TABLE. Sections 6.2.2 and 6.2.3 are
+#      modality descriptions and carry no strength rating at all. The rating for
+#      offering RP/RT lives in the risk-group tables 6.3.1-6.3.4. Stop looking.
+#   2. EVERY ACTIVE-TREATMENT RECOMMENDATION THERE IS `Strong` -- intermediate
+#      RP "Offer RP to patients with a life expectancy of > ten years"; high-risk
+#      "Offer RP to selected patients"; high-risk IMRT+long-term ADT; all Strong.
+#      So keying confidence to the strength of the recommended action predicts
+#      `clear` on exactly the cases where the reference says `borderline`.
+# The strength rating is therefore NOT the missing mechanism, and SHARED_DECISION_BAND,
+# INTERMEDIATE_RISK_CANCER and HIGH_RISK_CANCER keep `clear` by default. Measured
+# 2026-09-04, judge-off, all 72: every branch-level demotion loses --
+#   SHARED_DECISION_BAND -> borderline          ranking 0.8377 -> 0.8361
+#   HIGH_RISK_CANCER -> borderline                          -> 0.8330
+#   HIGH+INTERMEDIATE+SHARED -> borderline                  -> 0.8314
+#   all active_treatment -> borderline                      -> 0.8307
+#   EAU high risk (PSA>20 or ISUP>=4) -> borderline         -> 0.8307
+# because borderline is not the majority label in ANY branch (HIGH_RISK_CANCER
+# splits 3/9, SHARED_DECISION_BAND 5/7). Do not retry these.
+#
+# 💡 Two findings that constrain whatever is written here next:
+#   - ADVANCED DISEASE IS `clear`, NOT BORDERLINE. PSA 190 / 160 / 113 with
+#     probable M1 are all labelled `clear`, with staging named as the next
+#     step. The plan is unambiguous even when the disease
+#     is advanced. Any "worse disease => less sure" rule is backwards.
+#   - THERE IS A NOISE FLOOR. Two near-identical ISUP 2 cases, one
+#     `borderline` and one `clear`, are carrying the same stated RP-vs-RT discussion.
+#     Four of the 14 borderlines turn on a
+#     choice WITHIN active_treatment, which no class-level definition can reach.
+#     Do not chase them.
+#
+# 💡 A THIRD FINDING, 2026-09-04: THE LABEL CARRIES A BATCH EFFECT. Six of the 14
+#     borderlines sit in one contiguous block of 11 case ids -- 6 of 11 (55%)
+#     against 8 of 61 (13%) elsewhere, Fisher exact two-sided p = 0.005, and that block's
+#     rationales are ~1.7x longer (130 vs 78 chars). Read as a second annotator or
+#     a second pass applying a lower threshold. It is the single largest predictor
+#     of `borderline` found so far and it is not clinical. Treat the residual
+#     confidence gap as label noise, not headroom.
+
+# ---- unassignable clinical stage under active treatment -----------------
+# ⚠️ ADDED 2026-09-04, owner-approved, lifting the freeze for this rule only.
+#
+# The mechanism, and it is an EAU precondition rather than a strength rating.
+# Every active-treatment recommendation in `treatment_2026.txt` 6.3.4 is written
+# against a KNOWN nodal/metastatic stage -- "Offer RP to selected patients with
+# cN0 disease", "Offer patients with cN0 disease IMRT/VMAT + IGRT...", "...to
+# cN0M0 patients with >= 2 high-risk factors", "...to cN1M0 patients". A cTx
+# case has no assignable clinical stage at all, so the record cannot establish
+# the precondition of the recommendation we are making. We are confident in the
+# management CLASS (this cancer needs treating) and cannot fix the plan. That is
+# what `borderline` means.
+#
+# ⚠️ SCOPED TO active_treatment ON PURPOSE, and the scoping is the rule.
+# `cTx` alone is +1/-1 and nets exactly zero: a GG4 case (active_treatment)
+# is labelled `borderline`, a GG2 case (active_surveillance via
+# `_uncharacterised_gg2`) is labelled `clear`. And the reference is right to
+# split them. Surveillance carries no stage precondition -- the whole point of
+# the uncharacterised-GG2 rung is that staging is the NEXT STEP, which makes the
+# plan definite rather than uncertain. Only an irreversible decision needs the
+# stage settled first. Do not widen this to bare cTx.
+#
+# ⚠️ MATCHES `cTx` EXPLICITLY, NEVER A MISSING STAGE. An unassignable stage is a
+# positive finding; a blank field is an unread one. Conflating them is the same
+# error class as `task1.py::signal()` reading a missing PI-RADS as a reassuring
+# one, which the 2026-09-03 audit logged. The dev CSV has 8 Task 2 rows with an
+# empty `clinical_t_stage` and they must NOT fire this.
+#
+# Numbers, judge-off, all 72: confidence 0.9058 -> 0.9130, mean case score
+# 0.7196 -> 0.7212, ranking 0.8377 -> 0.8385. One case moves, `clear` ->
+# `borderline`, conf score 0.50 -> 1.00. No decision moves, no other component
+# moves.
+# ⚠️ n=1 on the labelled set, and INERT ON DEV: `clinical_t_stage` is recorded on
+# 28 of 36 Task 2 dev rows and NOT ONE of them is cTx (22 cT1c, 5 cT2a, 1 cT2, 8
+# blank). Fires 0/36, so the dev cohort can neither confirm nor contradict it --
+# the same one-cohort ceiling as the four rules added 2026-09-03.
+unstageable:
+  enabled: true
+  # Only where the recommendation is irreversible.
+  decision: active_treatment
+  confidence: borderline
+
+# ---- when a variable is live at all -------------------------------------
+# A variable is `consulted` where its value could change the management step.
+# PSA and age bear on every case. Stage and comorbidity only bear when they say
+# something, which is what the clinicians write: stage is named in 11% of
+# rationales from cT2 up and *never* at cT1c; comorbidity in 26% when there is
+# some against 15% when there is not.
+#
+# The primary Gleason pattern was tried here and rejected: pattern 4 is
+# equivalent to ISUP >= 3, so it carries nothing the grade does not already,
+# and clinicians name Gleason patterns at the same rate either way (14%/11%).
+live:
+  # An incidental cT1c tumour adds nothing to the discussion; a palpable or
+  # visible one changes the staging and the treatment options.
+  # GT important/decisive: cT1 35%, cT2 59%, cT3+ 100%.
+  stage_palpable_from: 2
+  # ...and where there is no gradeable tissue, the clinical stage is the only
+  # characterisation of the cancer available, so it carries what the grade
+  # would otherwise carry. Read from the twelve-case walkthrough of 2026-09-04:
+  # where the reference does NOT weight the stage it has already committed the
+  # weight to the tissue (the grade and both Gleason patterns important or
+  # decisive), and where it DOES, the tissue is
+  # absent or insufficient or the plan turns on whether the
+  # disease is confined.
+  # ⚠️ The stage value itself does not predict this. Within cT1c the reference
+  # splits 16/48 with NO separating feature: two cT1c ISUP 1 PI-RADS 4 cases
+  # with a normal DRE and the same rationale sentence are `important` and
+  # `not_used` respectively. Do not go looking for a cT threshold.
+  # Measured on all 72: factor F1 0.7218 -> 0.7276, variable weights unchanged
+  # at 0.8536, ranking 0.8375 -> 0.8380.
+  stage_characterises_ungraded: true
+  # Competing risk only bears when there is comorbidity to weigh.
+  # ⚠️ Moving this to 4 looks right in aggregate (GT calls comorbidity
+  # important in 14% of cases at 0-1 conditions, 38% at 2-3, 100% at 4+) and
+  # gains 0.0034 on dev -- but loses 0.0017 on test. The 2-3 band sits too
+  # close to a coin flip to move the line on. Left at 2.
+  comorbidity_burden: 2
+  # The Gleason patterns are discussed once pattern 4 dominates. GT marks them
+  # important/decisive in 14% of ISUP <= 1 cases, 29% at ISUP 2 and 53% at
+  # ISUP >= 3.
+  gleason_pattern_from: 3
+  # ⚠️ PI-RADS 4 looks like an uninformative middle -- GT calls PI-RADS
+  # important/decisive 75% of the time at <= 3, 41% at 4 and 83% at 5 -- and
+  # skipping it gains 0.0021 on dev while losing 0.0007 on test. 41% is not far
+  # enough from half to act on, so PI-RADS stays consulted at every value.
+  # Set to a value no PI-RADS score takes to disable the exclusion.
+  pirads_uninformative: 0
+  # The grade settles low-risk and high-risk disease. In between it informs a
+  # decision it does not make -- which is what "shared decision" means, and
+  # what GT says: ISUP 2 is important 11 times against decisive once, ISUP 3
+  # important 4 against 1, while ISUP 1 is decisive 12/19 and ISUP >= 4 is
+  # decisive 6/10.
+  grade_settles_below: 2
+  grade_settles_from: 4
+
+# ---- how a role becomes a reported weight -------------------------------
+# ---- where the comorbidity burden actually bears on the answer ----------
+# Comorbidity answers "is this man well enough for what we are proposing?" --
+# a question about WHETHER TO TREAT AT ALL.  It says nothing about WHAT THIS
+# CANCER IS, and on the branches that answer only the second question the
+# reference stops marking it:
+#
+#   branch                                n   ref important/decisive
+#   TREATMENT_WOULD_NOT_BENEFIT           1   100%
+#   SYMPTOM_DRIVEN_TREATMENT              3    67%
+#   FAVOURABLE_INTERMEDIATE_SURVEILLANCE  4    50%
+#   LOW_RISK_CANCER                      17    35%
+#   HIGH_RISK_CANCER                     12    33%
+#   ---- below the 0.33-0.40 break-even ----
+#   NO_CANCER_CONFIRMED                  13    23%    <- no cancer to treat
+#   SHARED_DECISION_BAND                 12    17%    <- turns on tumour biology
+#   INTERMEDIATE_RISK_CANCER              4     0%    <- treatment is indicated
+#
+# The rationales say the same thing.  Where it is marked the clinician writes
+# the comorbidity out, and where it is not, the sentence is about the cancer.
+#
+# 💡 The tell on SHARED_DECISION_BAND: two of those rationales DO reason about
+# life expectancy ("the patient has a quite long life expectancy, treatment
+# should be discussed") and still mark comorbidity `noted` -- because the input
+# they are reading it from is AGE.  The reference marks `age` decisive on 4 of
+# those 12; comorbidity important on 2.
+#
+# ⚠️ LOW_RISK_CANCER (35%) and HIGH_RISK_CANCER (33%) sit INSIDE the break-even
+# band and are deliberately left marked: on the first, how much life there is
+# to protect is part of surveillance-versus-treatment, and on the second,
+# whether he can tolerate radical therapy is a real question.  Demoting those
+# too was measured and is worse (important/decisive F1 0.7016 vs 0.7086).
+#
+# Measured on all 72: variable weights 0.8401 -> 0.8446, important/decisive F1
+# 0.7014 -> 0.7086, ranking 0.7992 -> 0.8003.  No decision or confidence moves.
+# ---- what the PSA is doing on this branch (2026-09-04) ------------------
+# `_CONSULTED` reports PSA `important` on every case, which says the field
+# exists rather than that this value bears on this patient. On two branches the
+# reference is reading the value, and the thresholds below are the EAU lines
+# already used by `risk`, not new numbers fitted here.
+#
+psa_weight:
+  NO_CANCER_CONFIRMED:
+    # The class is settled by the negative biopsy; the weights describe the plan
+    # inside it. Above the EAU high-risk line the PSA is why surveillance
+    # continues at all, and the reference plans re-biopsy or a repeat PSA.
+    decisive_from: 20.0
+    # And below 1 ng/mL, with a negative biopsy, the PSA effectively excludes
+    # clinically significant cancer -- which is what lets surveillance be
+    # minimal rather than intensive. Weighted for what it rules out.
+    # ⚠️ `important`, not `decisive`, on purpose: the two lowest values sit on
+    # opposite sides of the reference, so no threshold separates them. `important` is right either way -- same important/decisive set for
+    # the factor F1, at most one ordinal step from decisive. Do not try to
+    # split these two cases.
+    # ⚠️ Emits what the `_CONSULTED` blanket default already emits, so it moves
+    # no metric today. Written down so the reason survives that default's
+    # removal.
+    important_below: 1.0
+  HIGH_RISK_CANCER:
+    # Above 100 the PSA is a burden statement rather than a risk-class one: it
+    # drives metastatic staging, and says something the grade does not.
+    decisive_from: 100.0
+    # Below the EAU intermediate line, a case that is already high risk on its
+    # grade gains nothing from its PSA and the reference stops weighting it.
+    inert_below: 10.0
+
+comorbidity_inert_stages:
+  - NO_CANCER_CONFIRMED
+  - SHARED_DECISION_BAND
+  - INTERMEDIATE_RISK_CANCER
+
+# ---- what a branch named for ONE finding may claim to have leaned on ----
+# 2026-09-12. Same kind of correction as `comorbidity_inert_stages` and
+# `psa_weight`: it changes what we say carried the case, never what was decided.
+#
+# ADVERSE_HISTOLOGY is decided by a single item -- cribriform or intraductal
+# architecture on the biopsy. EAU `P2_exclude_cribriform` is a Strong
+# recommendation to keep such patients off active surveillance, and it carries
+# no qualifier on stage, on fitness or on the grade number: the morphology
+# excludes surveillance by itself. So on this branch and only on this branch,
+# the three variables below are context rather than drivers.
+#
+#   comorbidity -- bears on whether he is well enough for what we propose, not
+#                  on whether the histology excludes surveillance. Reference:
+#                  `noted` on 6 of 6.
+#   ct          -- the stage does not modify a morphological exclusion.
+#                  Reference: `noted` 5, `not_used` 1, of 6.
+#   bx_isup     -- the branch is named for the morphology, not the grade. The
+#                  grade is the context the morphology contradicts, which is
+#                  `important`, not the thing that decided. Reference:
+#                  `important` 5, `decisive` 1, of 6.
+#
+# Measured over the 72 (gate-passed 65, decisions and confidence unchanged):
+# variable weights 0.8528 -> 0.8570, important/decisive F1 0.7178 -> 0.7242.
+# ⚠️ n=6, and the external dev cohort carries no reference variable weights at
+# all, so this rule cannot be confirmed there -- it rests on the guideline and
+# on a reference that is unanimous or near-unanimous on each of the three.
+# ⚠️ The obvious companion was TRIED AND LOST: demoting both Gleason patterns to
+# `noted` on HIGH_RISK_CANCER, on the reading that the component patterns add
+# nothing once the ISUP is decisive. The ordinal error is unchanged (the
+# reference splits 6 `noted` / 3 `important` / 3 `decisive` there) and the
+# factor F1 falls 0.7178 -> 0.7138. Do not retry it.
+branch_demotions:
+  ADVERSE_HISTOLOGY:
+    comorbidity: available
+    ct: available
+    bx_isup: consulted
+
+roles:
+  settled: decisive
+  consulted: important
+  available: noted
+  unused: not_used
+
+# ---- reporting ----------------------------------------------------------
+# Every reference reveal_sequence in Task 2 is empty, and an empty sequence
+# scores full tool precision, so we report consulting nothing. Retrieval still
+# happens -- this is what we report, not what we read.
+reveals: []
+
+# ---- what the rationale is allowed to assert ----------------------------
+# The rationale judge sees the clinical-data socket and nothing else, so a
+# finding it cannot find there reads as a fabrication however true it is. Task 1
+# gates its presenting facts on `sections` plus `patient_card`; Task 2 had no
+# gate at all, which is how "the patient's age of 70 years" reached 12 of 64
+# rationales and cost them 0.517 against 0.750 for the rest.
+#
+# Measured across all 153 released Task 2 cases -- value present literally in
+# the socket: psa 153, psad 153, ct 153, bx_isup 153, bx_gl_prim 153,
+# bx_gl_sec 153, cspca 153, pirads 153 (as report text); age 27 (18%),
+# ipss 0, enc_type 0. `comorbidity` renders as a COUNT ("2 comorbidities
+# recorded") which appears in no document at all.
+#
+# ⚠️ This governs the prose only. Age and comorbidity keep their
+# variable_weights, still reach the model as background, and still decide
+# cases -- they are just never quoted back at the judge.
+assertable:
+  - psa
+  - psad
+  - pirads
+  - ct
+  - bx_isup
+  - bx_gl_prim
+  - bx_gl_sec
+  - cspca
+
+# ---- facts the branch must lead with, whatever their weight -------------
+# `variable_weights` answers "what did the clinician lean on?"; the rationale
+# answers "what is this case?". They are not the same list, and NO_CANCER_
+# CONFIRMED is where they come apart: the negative biopsy is what DEFINES the
+# branch, the reference names it in 11 of those 13 rationales, and we weighted it `noted` (which matches the
+# reference: it agrees 13/13) and therefore never presented it at all. The
+# judge noticed, faulting the note for omitting the negative pathology report.
+#
+# So the weight stays where the reference puts it and the FACT gets presented
+# anyway. `ISUP grade group 0` is what the pathology report says for a negative
+# session, so it is groundable verbatim.
+present_regardless:
+  NO_CANCER_CONFIRMED:
+    - bx_isup
+
+labels:
+  bx_isup: "ISUP grade group {value}"
+  bx_gl_prim: "primary Gleason pattern {value}"
+  bx_gl_sec: "secondary Gleason pattern {value}"
+  psa: "PSA {value} ng/mL"
+  psad: "PSA density {value}"
+  ct: "clinical stage {value}"
+  pirads: "PI-RADS {value}"
+  age: "age {value}"
+  comorbidity: "{value} comorbidities recorded"
+  fh: "family history {value}"
+  cspca: "csPCa probability {value}"
+
+# ---- what would change the answer ---------------------------------------
+# Ported from Task 1, where the same clause was the fix for two judge
+# deductions. A surveillance recommendation that does not say what would end
+# surveillance is a refusal to treat rather than a plan, and the clinicians
+# write the trigger out: "repeat PSA in 6 months to evaluate the need for a
+# confirmatory biopsy", "Active surveillance improves QoL - I would prioritise
+# it until progression", "If it is going up repeat MRI or PSMA-PET and
+# eventually biopsy".
+#
+# Measured on the 72 labelled cases: 12 reference rationales name a follow-up
+# trigger, and 10 of the 12 sit on these two branches -- 29% of the surveillance
+# cases against 5% of the treatment ones. So the clause is attached to
+# surveillance only, which is the Task 1 rule ("trigger on the withhold
+# decision") in Task 2 terms. The table is itself the gate: a branch with no
+# entry states no trigger.
+#
+# ⚠️ TREATMENT_WOULD_NOT_BENEFIT is deliberately absent. Its stated reason
+# already ends "treat only if it becomes symptomatic", and Task 1 trimmed
+# DENSITY_CONTRADICTS_IMAGING for exactly that reason -- a trigger repeated
+# immediately after the reason that contains it reads as padding.
+#
+# ⚠️ The other half of the Task 1 lever -- `missing_evidence`, the "this is not
+# documented" clause -- is deliberately NOT ported. Zero of the 72 Task 2
+# reference rationales ask for anything the record does not contain, against a
+# dominant theme of exactly that in Task 1. There is nothing honest to declare
+# missing here, and an unchecked "not documented" is a fabrication like any
+# other.
+#
+# ⚠️ REWORDED 2026-08-29. The clause used to end "or progression on repeat
+# imaging would move this to treatment". That is wrong: EAU has MRI progression
+# during surveillance prompt a repeat BIOPSY to establish histological
+# progression, and PSA kinetics likewise trigger investigation rather than
+# treatment. Transition to treatment is driven by pathological reclassification,
+# adverse histology (a rise to GG3, growing GG2 volume, cribriform or
+# intraductal disease), clear clinical progression, or the patient's own
+# preference. Imaging and biochemistry escalate the investigation, not the
+# management.
+# ---- what happens next, per branch --------------------------------------
+# ⚠️ PROSE ONLY, exactly as in `task1_policy.yaml`. Added 2026-09-08.
+#
+# "Multidisciplinary treatment review" closed every active-treatment case: 29
+# judged cases, mean rationale 0.710, the worst of the four canned strings
+# (against 0.856 for "serial PSA with clinical review"). The reference wants
+# either staging or a named modality choice. EAU `treatment_2026.txt` 6.3.1-6.3.4 grounds the risk-group actions, and
+# CLAUDE.md records that 7 of 12 reference rationales on the high-risk branch
+# name staging outright.
+next_step:
+  HIGH_RISK_CANCER: "metastatic staging, then radical prostatectomy or radiotherapy"
+  INTERMEDIATE_RISK_CANCER: "discuss radical prostatectomy against radiotherapy"
+  SHARED_DECISION_BAND: "discuss surveillance against radical treatment with the patient"
+  # ⚠️ Names no symptom: IPSS is invisible to the judge on every case this
+  # branch fires on. See the LUTS entry in rationale._REASON_REWRITES.
+  SYMPTOM_DRIVEN_TREATMENT: "discuss radical treatment against continued surveillance with the patient"
+  ADVERSE_HISTOLOGY: "metastatic staging, then radical prostatectomy or radiotherapy"
+  GRADE_INCOHERENT_WITH_DISEASE: "review the pathology before committing to treatment"
+  # surveillance branches -- the reference names a confirmatory biopsy far more
+  # often than it names another PSA
+  LOW_RISK_CANCER: "serial PSA with a confirmatory biopsy under surveillance"
+  FAVOURABLE_INTERMEDIATE_SURVEILLANCE: "serial PSA with a confirmatory biopsy under surveillance"
+  LOW_GRADE_HIGH_PSA_DISCORDANCE: "repeat the PSA under standardised conditions before re-biopsy"
+  NO_CANCER_CONFIRMED: "interval PSA, with repeat MRI if it continues to rise"
+  GRADE_NOT_RECORDED: "obtain the pathology grade before choosing treatment"
+  TREATMENT_WOULD_NOT_BENEFIT: "symptom-directed review without further cancer staging"
+
+triggers:
+  NO_CANCER_CONFIRMED: "a further PSA rise would prompt repeat imaging, and a persistent suspicion would prompt a further biopsy"
+  LOW_RISK_CANCER: "reclassification on confirmatory or surveillance biopsy, adverse histology or clinical progression would move this to treatment, as would the patient's own preference; a rising PSA or growth on repeat imaging would prompt a further biopsy rather than treatment"
+  FAVOURABLE_INTERMEDIATE_SURVEILLANCE: "reclassification on confirmatory biopsy, adverse histology or clinical progression would move this to treatment, as would the patient's own preference; a rising PSA or growth on repeat imaging would prompt that confirmatory biopsy rather than treatment"
+  LOW_GRADE_HIGH_PSA_DISCORDANCE: "a persistently high standardised PSA, adverse pathology on review or confirmatory biopsy, or positive metastatic staging would end this provisional surveillance strategy"
+
+# ---- the digital-pathology grade: recorded, never acted on --------------
+# The reported ISUP grade stays authoritative. The report's AI-predicted grade
+# is HIGHER than the reported one in 54 of the 64 reports carrying it, including
+# every active-surveillance case, so its calibration is plainly unsuitable for
+# autonomous management decisions and it must never change a risk group.
+# ⚠️ But discarding the disagreement silently is also wrong (reviewer,
+# 2026-08-29): a large discordance is a fact about the record and the safe use
+# is a pathology-review flag. It goes to the audit only -- rationale prose is
+# judged, and this is unmeasurable offline.
+pathology_review:
+  discordance_at_least: 2
+  in_audit: true
+  in_rationale: false
+  text: "the digital-pathology grade prediction is {gap} grade groups above the reported grade; a pathology review is an option"
+
+# ---- labels we disagree with, and did not fit to ------------------------
+# Three released labels were put to a consultant urologist on 2026-08-29, who
+# reached the same reading independently: in each, the reference's own
+# rationale or the pathology report contradicts the recorded class. NO RULE
+# CHANGES were made for them.

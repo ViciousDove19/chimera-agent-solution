@@ -1,0 +1,438 @@
+# The Task 2 management policy as a graph.
+#
+# Transcribed from `docs/updated_task_2_policy` -- section 2 (stage 0 and the
+# three risk tracks), section 3 (the master decision matrix) and section 4 (the
+# reference pseudocode). Structure and thresholds are the document's. Where the
+# three statements of a node disagree, all are recorded and the node carries
+# `conflict:`; choosing between them is a policy call, not a transcription one.
+#
+# Same contract as resources/task1_graph.yaml: `missing_policy` is declared once
+# per variable, `load` refuses a graph that leaves one undeclared, and
+# `scripts/audit_policy_graph.py` sweeps the complete-data state space.
+
+version: 1
+source: docs/updated_task_2_policy
+entry: t2_grade
+
+variables:
+  bx_isup:
+    kind: ordinal
+    values: [0, 1, 2, 3, 4, 5]
+    note: >-
+      The ISUP grade group on this biopsy. 0 means the biopsy found no cancer.
+      ⚠️ `updated_task_2_policy` has NO track for it -- see `t2_negative`.
+  ct:
+    kind: categorical
+    values: [cT1c, cT2, cT2a, cT2b, cT2c, cT3a, cTx]
+    note: >-
+      ⚠️ `cT2` with no sub-stage is NOT in updated_task_2_policy's vocabulary and
+      appears on 4 released cases, where it left
+      the whole intermediate reading unanswerable. It ranks as cT2a below,
+      because the unfavourable factor requires the stage to be SHOWN at or above
+      cT2b and a bare cT2 does not show that -- the same "silence does not admit"
+      rule every other positive precondition here follows.
+  pirads: {kind: ordinal, values: [1, 2, 3, 4, 5]}
+  psa: {kind: continuous, thresholds: [10.0, 20.0]}
+  psad: {kind: continuous, thresholds: [0.15]}
+  psav: {kind: continuous, thresholds: [2.0]}
+  vol: {kind: continuous, thresholds: [60]}
+  age: {kind: continuous, thresholds: [80]}
+  ipss: {kind: continuous, thresholds: [19]}
+  pattern4_high:
+    kind: categorical
+    values: [true, false]
+    note: >-
+      Pattern 4 above 10-20% or cribriform/intraductal morphology. NOT in the
+      structured prompt -- it is in the pathology report, which
+      `briefs2.REVEAL_ITEMS` serves as PATTERN_4_DETAIL.
+  histology_stable:
+    kind: categorical
+    values: [true, false]
+    note: >-
+      Does the pathology report state stability across MORE THAN ONE biopsy?
+      Read by `policy_graph.histology_stable`, which imports the frozen
+      `policy._histology_stable_across_timepoints` rather than restating it. True
+      on 59 of the 153 released reports. ⚠️ The corpus writes a stability summary
+      for single-biopsy patients too ("stable across the single available
+      timepoint"), which is vacuous, and those are excluded; any sentence
+      reporting an upgrade vetoes the flag. A report that does not say it has not
+      shown a trajectory -- silence does not admit.
+  single_timepoint:
+    kind: categorical
+    values: [true, false]
+    note: >-
+      Does the pathology report state that only ONE biopsy timepoint exists?
+      `policy_graph.single_timepoint`, importing the frozen
+      `policy._single_biopsy_timepoint`. True on 27 of 153, positively stated in
+      as many words. A report that merely describes one specimen has NOT told us
+      the sampling is complete, and does not satisfy this.
+  ct_rank:
+    kind: derived
+    derived: "{'cT1c': 1, 'cT2': 2, 'cT2a': 2, 'cT2b': 3, 'cT2c': 4, 'cT3a': 5, 'cTx': 0}[ct]"
+    needs: [ct]
+    note: "The clinical stage as a number, so a guard can say 'at or above cT2b'."
+  unfavourable:
+    kind: derived
+    derived: "count(ct_rank >= 3, pirads == 5, psa > 10.0, psav > 2.0, psad >= 0.15)"
+    needs: [ct, pirads, psa, psav, psad]
+    note: >-
+      How many of the six unfavourable-intermediate factors are present
+      (updated_task_2_policy Track B). The COUNT, not the fact, because the
+      document reads one marginal factor differently from several concordant
+      ones -- see `t2_isup2_unfavourable`.
+
+missing_policy:
+  bx_isup:
+    when_missing: retrieve
+    by: PATTERN_4_DETAIL
+    then: continued_surveillance
+    because: >-
+      The grade of THIS biopsy is in the pathology report this encounter
+      generated; unlike Task 1's historical grade it is retrievable. If it
+      cannot be read, the record does not establish cancer at this encounter and
+      the answer is continued monitoring, not treatment.
+  pattern4_high:
+    when_missing: retrieve
+    by: PATTERN_4_DETAIL
+    then: not_excluded
+    because: >-
+      Cribriform and pattern-4 burden are in the pathology report. ⚠️ Absent is
+      NOT "absent morphology": it cannot satisfy the favourable-intermediate
+      rung, which requires the adverse factors to be positively excluded. EAU
+      P2_exclude_cribriform is a Strong recommendation to exclude such patients
+      from surveillance, and silence does not exclude.
+  histology_stable:
+    when_missing: retrieve
+    by: PATTERN_4_DETAIL
+    then: not_shown
+    because: >-
+      A written trajectory is in the pathology report. ⚠️ Absent is NOT
+      "unstable": it cannot satisfy the cT2a-b rung, which requires
+      non-progression positively stated. Every guard reading it is a STATE test
+      (`is True`), so an unread report falls through to the favourable /
+      unfavourable split rather than here -- same construction as
+      `pattern4_high`.
+  single_timepoint:
+    when_missing: retrieve
+    by: PATTERN_4_DETAIL
+    then: not_shown
+    because: >-
+      Also in the pathology report, also positively stated, also read by a STATE
+      test. An unread report has not shown a single timepoint and the
+      uncharacterised rung does not fire.
+  ct: {when_missing: order_first, then: active_surveillance,
+       because: "Clinical stage is an examination and a scan already performed; while it is unread the conservative arm holds."}
+  pirads: {when_missing: order_first, then: active_surveillance,
+           because: "An MRI is cheaper and safer than radical treatment."}
+  psa: {when_missing: order_first, then: active_surveillance,
+        because: "A blood test."}
+  psad: {when_missing: order_first, then: active_surveillance,
+         because: "Computable from a PSA and a gland volume."}
+  psav: {when_missing: order_first, then: active_surveillance,
+         because: "Derived from the PSA series."}
+  vol: {when_missing: order_first, then: active_surveillance,
+        because: "Measured on the same scan."}
+  ipss: {when_missing: order_first, then: active_surveillance,
+         because: "A questionnaire. Its absence cannot make a case borderline for symptoms nobody recorded."}
+  age: {when_missing: order_first, then: active_surveillance,
+        because: "Administrative; if it is absent the record is broken."}
+
+leaves:
+  active_surveillance:    {decision: active_surveillance, says: "Active surveillance"}
+  continued_surveillance: {decision: continued_surveillance, says: "Continue monitoring"}
+  active_treatment:       {decision: active_treatment, says: "Radical treatment"}
+  watchful_waiting:       {decision: watchful_waiting, says: "Watchful waiting, symptom directed"}
+
+nodes:
+
+  - id: t2_benefit_window
+    eau: [E1_life_expectancy, P6_as_protocol]
+    track: ALL
+    asks: "Is there a benefit window long enough for curative-intent management?"
+    reads: [age]
+    source: "updated_task_2_policy section 2, Stage 0"
+    substitutes_for: "an estimated life expectancy in years"
+    resolved: >-
+      As written this branched on life expectancy, which no record carries. Age
+      stands in at the line resources/agentic_task1.yaml states the reason for:
+      male life expectancy at 80 is under ten years even in good health. The
+      document itself calls this leaf `CLEAR`.
+      ⚠️ MOVED BELOW THE GRADE GATE, 2026-09-10, for the same reason the PSA
+      ceiling was. As transcribed it ran first and sent an 81-year-old with
+      ISUP 3 and a rapidly rising PSA to watchful waiting, where the reference
+      treats. The benefit window chooses between curative
+      and palliative intent for INDOLENT disease; it does not withhold treatment
+      from high-grade disease that is already progressing. Reached now only from
+      ISUP 1 and 2.
+      ⚠️ Measured 0 for 1 on the labelled set even so: it fires on one case
+      alone and the reference's two `watchful_waiting` cases are aged 70-77,
+      so age is NOT the mechanism the reference uses for that class. Kept because
+      EAU ties watchful waiting to life expectancy and the test set is unseen,
+      not because this cohort supports it.
+    confidence:
+      decides_on: [age]
+    edges:
+      - when: "age >= 80"
+        to: watchful_waiting
+      - when: "age < 80"
+        to: t2_systemic_ceiling
+
+  - id: t2_systemic_ceiling
+    eau: []   # no EAU rule licenses a bare PSA threshold; see the note
+    track: ALL
+    asks: "Is the PSA past the level that makes this a systemic question?"
+    reads: [psa, bx_isup]
+    source: "updated_task_2_policy section 3, Systemic Risk Ceiling row"
+    conflict: >-
+      ⚠️ The matrix row makes PSA > 20 `ACTIVE TREATMENT` outright, and section 2
+      Track C lists PSA > 20 as one high-risk criterion among several rather than
+      a rule of its own. EAU's own position is that a PSA change alone should not
+      change management (`treatment_2026.txt`, `P9_change_on_biopsy_only`) --
+      which is why the identical rule was DELETED from the Task 1 graph on
+      2026-09-10. It is transcribed here because the document states it; whether
+      it survives is the same policy call, and CLAUDE.md records that a Task 1
+      PSA >= 20 rule was removed once for having the number without the reason.
+    confidence:
+      decides_on: [psa]
+    edges:
+      - when: "psa > 20.0"
+        to: active_treatment
+      - when: "psa <= 20.0 and bx_isup == 1"
+        to: t2_isup1
+      - when: "psa <= 20.0 and bx_isup == 2"
+        to: t2_isup2_ladder
+
+  - id: t2_grade
+    eau: [P1_as_standard]
+    track: ALL
+    asks: "What does the biopsy grade make this?"
+    reads: [bx_isup]
+    source: "updated_task_2_policy section 2, Stage 1 tracks A / B / C"
+    confidence:
+      decides_on: [bx_isup]
+    edges:
+      - when: "bx_isup == 0"
+        to: t2_negative
+      - when: "bx_isup == 1 or bx_isup == 2"
+        to: t2_benefit_window
+      - when: "bx_isup >= 3"
+        to: active_treatment
+
+  - id: t2_negative
+    eau: [N2_negative_targeted]
+    track: NEGATIVE
+    asks: "The biopsy found no cancer -- what now?"
+    reads: [bx_isup]
+    source: "NOT IN updated_task_2_policy -- added 2026-09-10 to close a hole"
+    resolved: >-
+      ⚠️ `updated_task_2_policy` has no track for a negative biopsy: it begins at
+      ISUP 1 and never emits `continued_surveillance` at all. The reference uses
+      that class on **14 of the 72** labelled cases, so the document as written
+      cannot answer a fifth of the task. A man whose biopsy found no cancer is
+      not on active surveillance FOR a cancer -- he is being monitored -- which
+      is what `continued_surveillance` means and why the class exists.
+    confidence:
+      decides_on: [bx_isup]
+    edges:
+      - when: "bx_isup == 0"
+        to: continued_surveillance
+      - when: "bx_isup != 0"
+        to: continued_surveillance
+
+  - id: t2_isup1
+    eau: [P1_as_standard]
+    track: LOW
+    asks: "Low-risk disease: does anything argue against surveillance?"
+    reads: [bx_isup, ipss, psad, psa, pattern4_high]
+    source: "updated_task_2_policy section 2, Track A"
+    resolved: >-
+      ⚠️ CRIBRIFORM IS CONFIDENCE HERE, NOT DECISION (owner, 2026-09-10).
+      `P2_exclude_cribriform` is Strong and carries no grade qualifier --
+      "Exclude patients with cribriform or intraductal histology on biopsy from
+      AS" -- so on the guideline it should exclude at ISUP 1 as much as at
+      ISUP 2. The reference disagrees on this cohort: of the 4 ISUP 1 cases
+      reporting cribriform, THREE are labelled `active_surveillance`, and the
+      one that is treated is already reached by the LUTS switch. Applied as a decision it measured 66 -> 63.
+      So the owner split it: cribriform DECIDES at ISUP 2, where the band is
+      genuinely ambiguous and it is unfavourable on two counts, and DEFERS at
+      ISUP 1, where the recommendation stands but is not a settled one. The
+      guideline is not discarded -- it moves to the field where "the guideline
+      and this record disagree" belongs, and the rationale can say so.
+      Track A's inclusion criteria (PSA < 10, stage <= cT2a, no high-risk imaging)
+      are not re-tested here: PSA > 20 has already exited at the ceiling, and the
+      document gives ISUP 1 a single recommendation with the rest read as
+      CONFIDENCE rather than as decision. Both of its confidence conditions are
+      recorded below so the later confidence work has them.
+      ⚠️ THE LUTS SWITCH IS A DECISION, added 2026-09-10. The source document
+      reads severe obstruction as a confidence caveat only, and the reference
+      sends three such cases to treatment. The mechanism is
+      the frozen policy's `SYMPTOM_DRIVEN_TREATMENT`: this man needs outlet
+      surgery for benign disease anyway, so the one operation that also removes
+      the cancer is the better single operation. That presupposes the raised PSA
+      is the GLAND'S and not the tumour's, which is what the density settles --
+      hence the `psad < 0.20` gate the owner added on 2026-09-08. Below the line
+      the density carries no cancer case of its own and the symptoms may act as
+      the tiebreaker; at or above it the cancer question is not quiescent and
+      management follows the cancer. ⚠️ A positive precondition: a missing
+      density blocks the switch.
+      ⚠️ `psa <= 10.0` is the same reading applied to the PSA level, at the
+      frozen policy's own `psa_unfavourable` line. The switch claims the cancer
+      question is quiescent enough for the symptoms to act as the tiebreaker,
+      and a PSA above 10 is not quiescent whatever the density says. Without
+      it the switch fires on one surveillance-labelled case and the +3 becomes
+      +3/-1.
+      ⚠️ Gating on the IMAGING instead was tried and measured worse: PI-RADS
+      does not separate these cases -- treated and surveilled cases alike are
+      PI-RADS 5.
+    confidence:
+      decides_on: [bx_isup]
+      conflicts:
+        - when: "ipss > 19"
+          gives: borderline
+          because: >-
+            Severe LUTS. Surveillance manages the oncologic risk and leaves the
+            obstruction unaddressed, and one operation could treat both -- the
+            document's own reason, and the same mechanism as Task 2's
+            SYMPTOM_DRIVEN_TREATMENT switch.
+        - when: "psad >= 0.15"
+          gives: borderline
+          because: >-
+            Suggests unsampled high-grade disease and mandates early
+            confirmatory imaging or re-biopsy.
+        - when: "pattern4_high is True"
+          gives: borderline
+          because: >-
+            EAU P2_exclude_cribriform is Strong and says to keep cribriform or
+            intraductal histology off active surveillance. The reference keeps
+            these men on it, so the recommendation follows the reference and the
+            confidence records that a Strong recommendation points the other
+            way. Fires on 3 of the 25 ISUP 1 cases.
+    edges:
+      - when: "ipss >= 20 and psad < 0.20 and psa <= 10.0"
+        to: active_treatment
+      - when: "not (ipss >= 20 and psad < 0.20 and psa <= 10.0)"
+        to: active_surveillance
+
+  - id: t2_isup2_ladder
+    eau: [P1_as_standard, P2_exclude_cribriform]
+    track: INTERMEDIATE
+    asks: "Does this record positively describe a GG2 man who should still be monitored?"
+    reads: [bx_isup, ct_rank, psa, psad, psav, pattern4_high, histology_stable, single_timepoint]
+    source: "resources/task2_policy.yaml -> surveillance.stable_favourable_gg2 and .uncharacterised_gg2; frozen policy task2.py, 2026-09-03"
+    resolved: >-
+      ⚠️ NOT from `updated_task_2_policy`, which has no such rung -- ported
+      2026-09-12 from the FROZEN Task 2 policy, where it is measured at +2 and
+      addresses two of the three real residuals this graph still carried.
+
+      A CLINICAL STAGE LADDER, not a burden test. cT1 disease is impalpable and
+      organ-confined, and EAU/PRIAS admit GG2 without invasive cribriform or
+      intraductal growth at PSA <= 20 and PSAD < 0.25 -- so a cT1c man who also
+      clears those numbers is a surveillance candidate on the stage alone. cT2a-b
+      is palpable but still unilateral and organ-confined: surveillance there has
+      to be EARNED by a trajectory -- histological stability written across more
+      than one biopsy plus a PSA velocity under the 2.0 ng/mL/yr line (d'Amico
+      2004). cT2c and above is bilateral or extracapsular and is treated.
+
+      The third rung is a different claim: not "this disease is indolent" but
+      "this record cannot yet support an irreversible decision". cTx means the
+      local extent was never assignable and a single stated biopsy timepoint
+      means the grade rests on one sample; with a density and velocity giving no
+      reason to hurry, the next step is staging and a confirmatory biopsy UNDER
+      surveillance. ⚠️ Deliberately NOT gated on cribriform, unlike the two rungs
+      above: the exclusion applies to committing a characterised cancer to a
+      formal AS protocol, and this recommendation is to monitor WHILE the cancer
+      is characterised.
+
+      ⚠️ EVERY precondition is positive. An unmentioned cribriform status, an
+      absent density or a stage of cTx admits nobody to rungs 1-2 -- this is the
+      surveillance side of the band and silence is not stability. That is what
+      separates this from the bare PRIAS criteria tested on 2026-09-02, which
+      admitted on the four recorded entry fields alone and went +2/-5.
+      ⚠️ `psa < 10.0` is restated here rather than relied upon: the frozen YAML
+      notes that over 10 the case is unfavourable-intermediate "and never reaches
+      here", which is true of the frozen ladder and NOT of this graph -- the
+      systemic ceiling above sends everything up to PSA 20 down this edge.
+    confidence:
+      decides_on: [ct_rank, pattern4_high]
+    edges:
+      - when: "ct_rank == 1 and psa < 10.0 and psad < 0.25 and pattern4_high is False"
+        to: active_surveillance
+      - when: "ct_rank >= 2 and ct_rank <= 3 and psa < 10.0 and psad < 0.25 and psav < 2.0 and pattern4_high is False and histology_stable is True"
+        to: active_surveillance
+      - when: "ct_rank == 0 and psad < 0.25 and psav < 2.0 and single_timepoint is True"
+        to: active_surveillance
+      - when: "not (ct_rank == 1 and psa < 10.0 and psad < 0.25 and pattern4_high is False) and not (ct_rank >= 2 and ct_rank <= 3 and psa < 10.0 and psad < 0.25 and psav < 2.0 and pattern4_high is False and histology_stable is True) and not (ct_rank == 0 and psad < 0.25 and psav < 2.0 and single_timepoint is True)"
+        to: t2_isup2
+
+  - id: t2_isup2
+    eau: [P1_as_standard, P2_exclude_cribriform]
+    track: INTERMEDIATE
+    asks: "Intermediate disease: is it favourable or unfavourable?"
+    reads: [unfavourable, pattern4_high]
+    source: "updated_task_2_policy section 2, Track B"
+    resolved: >-
+      Six factors, any one of which makes it unfavourable: stage at or above
+      cT2b, PI-RADS 5, PSA above 10, velocity above 2.0, density at or above
+      0.15, and a pattern-4 burden above 10-20% or cribriform morphology. The
+      node reads the COUNT rather than the fact, because the document treats one
+      marginal factor differently from several concordant ones -- and that
+      distinction is confidence, not decision.
+    confidence:
+      decides_on: [unfavourable]
+    edges:
+      - when: "unfavourable >= 1"
+        to: t2_isup2_unfavourable
+      - when: "unfavourable == 0 and pattern4_high is False"
+        to: t2_isup2_favourable
+      - when: "unfavourable == 0 and pattern4_high is not False"
+        to: t2_isup2_unfavourable
+
+  - id: t2_isup2_unfavourable
+    eau: [P1_as_standard]
+    track: INTERMEDIATE
+    asks: "Unfavourable intermediate: treat, and how settled is it?"
+    reads: [unfavourable]
+    source: "updated_task_2_policy section 2, Track B.1"
+    confidence:
+      decides_on: [unfavourable]
+      conflicts:
+        - when: "unfavourable == 0"
+          gives: borderline
+          because: >-
+            Reached with none of the five readable factors present -- the only
+            thing keeping this out of the favourable rung is that cribriform or
+            intraductal morphology could not be positively excluded. The
+            treatment rests on an absence, which is a shared choice and not a
+            settled recommendation.
+        - when: "unfavourable == 1"
+          gives: borderline
+          because: >-
+            Triggered by a single marginal parameter -- the document's example is
+            a PSA of 10.3 with otherwise reassuring findings. Several concordant
+            adverse criteria are `CLEAR`; one is a shared choice.
+    edges:
+      - when: "unfavourable >= 1"
+        to: active_treatment
+      - when: "unfavourable == 0"
+        to: active_treatment
+
+  - id: t2_isup2_favourable
+    eau: [P1_as_standard]
+    track: INTERMEDIATE
+    asks: "Favourable intermediate: surveillance, with what caveat?"
+    reads: [unfavourable]
+    source: "updated_task_2_policy section 2, Track B.2"
+    confidence:
+      decides_on: [unfavourable]
+      conflicts:
+        - when: "unfavourable == 0"
+          gives: borderline
+          because: >-
+            BORDERLINE by default for ISUP 2, and the document says why:
+            surveillance for grade group 2 carries a small but measurable
+            increase in metastatic risk over grade group 1, and the patient must
+            be counselled explicitly. Not a doubt about the recommendation -- a
+            statement that it is a shared decision.
+    edges:
+      - when: "unfavourable == 0"
+        to: active_surveillance

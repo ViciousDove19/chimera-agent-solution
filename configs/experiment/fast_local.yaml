@@ -1,0 +1,33 @@
+# @package _global_
+# =============================================================================
+# Experiment overlay -- the FAST LOCAL ITERATION loop.
+#
+# Same model as the submission (`model/`, i.e. gemma-4-E2B-it), but served
+# over HTTP by vLLM's OpenAI server instead of the in-process offline
+# `vllm.LLM`. That one change is what makes batching possible: the offline
+# LLM serialises generate() calls, so cases run strictly one at a time
+# (~80 s each), while the server's scheduler batches whatever is in flight.
+#
+#     ../scripts/serve_local_llm.sh                 # terminal 1, keeps running
+#     make run RUN_ARGS="+experiment=fast_local agent.tasks=[2]"
+#
+# temperature 0 is deliberate: an A/B on 72 cases cannot separate a real
+# +0.02 from sampling noise if every re-run reshuffles the decisions.
+# Submission runs keep the sampled config -- this overlay is for measuring.
+# =============================================================================
+
+model:
+  provider: openai
+  model_id: model
+  base_url: http://127.0.0.1:8765/v1
+  api_key_env: LLAMA_API_KEY
+  request_timeout: 600
+
+generation:
+  temperature: 0.0
+  top_p: 1.0
+
+agent:
+  # Cases in flight at once. 8 keeps the server's batch full without
+  # pushing prefill latency up; raise it if the GPU is otherwise idle.
+  concurrency: 8

@@ -1,0 +1,444 @@
+# Task 1 -- should this patient be biopsied?
+#
+# Three questions, asked in order (see CLAUDE.md, "Task 1 policy -- the
+# intended reasoning structure"):
+#
+#   1. f      does this person have cancer?
+#   2. gate   how sure are we?
+#   3. net    could new histology change what happens next?
+#
+# Stage 1 has a primary channel and three corroborating ones.  PI-RADS says
+# which way the case points; PSA, PSA density and DRE each vote on whether they
+# see the same thing.  The vote count is what stages 2 and 3 read.
+#
+# ⚠️ Stage 3 no longer treats agreement as a reason to withhold tissue. A
+# urologist review on 2026-08-28 rejected that: repeat biopsy in known prostate
+# cancer is for re-grading, not for reconfirming that cancer exists. Stage 3
+# now asks whether the grade is on record, because grade is what chooses
+# between surveillance and treatment.
+
+# ---- stage 1: f, does this person have cancer? --------------------------
+suspicion:
+  pirads_likely: 4          # PI-RADS >= this points to cancer
+  pirads_equivocal: 3       # PI-RADS == this leaves the density to decide
+  psad_likely: 0.20         # ... and the density that tips it
+  # Below this the density *contradicts* the imaging. This is an uncertainty
+  # marker, not a veto: EAU recommends biopsy for PI-RADS 4-5 in every density
+  # cell. Discordance is disclosed and favours tissue to resolve it.
+  # ⚠️ 0.08 sits BELOW the 0.10 that guidelines use for deferring biopsy at
+  # PI-RADS 3, and it is partly data-chosen: the 0.08-0.10 band here is 6/6
+  # `yes`, so a 0.10 floor scores far worse (ranking 0.771 vs 0.831). Treat the
+  # direction as principled and the exact level as provisional.
+  # This marker is recorded only when a biopsy history makes the evidence
+  # genuinely discordant; it never changes a PI-RADS 4-5 direction to `no`.
+  psad_contradicts: 0.08
+
+  # ...and a density only means something in the context of the gland it was
+  # measured in. The same 0.01 is reassuring in a 36 mL prostate and arithmetic
+  # in a 99 mL one -- which is why a flat floor cannot be the whole rule.
+  #
+  # Read together, though, density and volume are not a second axis to fit:
+  # psad x vol IS the PSA. So multiply them back out and ask whether the answer
+  # is this man's PSA. A density of 0.01 in a 99 mL gland asserts a PSA of 1.0;
+  # if the stated PSA is 3.5, that density is not describing this patient and
+  # does not get to overrule a PI-RADS 4 lesion. Implemented as the same
+  # relation the other way round: |psa/vol - psad| against psa/vol.
+  #
+  # ⚠️ On the labelled set the stated-to-implied PSA ratio runs 0.9x-1.2x on
+  # every case but one, which sits at 3.5x -- a 3x gap, so 0.5 is not a fitted
+  # boundary. A volume gate would instead have to thread a cap between 91 and
+  # 98 mL, and 90 and 100 both fail. The
+  # dilution story is the right explanation; the encodable fact is this.
+  # ⚠️ READ BY `usable_density()`, WHICH RUNS BEFORE EVERY BRANCH. This is not a
+  # clinical threshold and carries no view about biopsy: applied on its own it
+  # changes no decision on the 91 labelled cases or the 50 development cases in
+  # `external_data/`. It only stops a quotient the record contradicts from being
+  # read as a measurement of this patient -- in either direction.
+  psad_max_disagreement: 0.5
+
+# A negative MRI does not veto a concordant, marked biochemical signal. This
+# is deliberately strict: all three values must be present, internally
+# consistent, and beyond their existing policy lines. There are no released
+# PI-RADS-2 cases with PSA > 15, so this is an owner-specified prospective rule,
+# not a fitted correction to the labelled cohort.
+biochemical_override:
+  pirads: 2
+  psa_above: 15
+  psad_above: 0.20
+  volume_at_or_below: 70
+
+# ---- when the gland makes the density unreadable ------------------------
+# A density is PSA divided by volume, so a gland large enough will drive the
+# quotient down whatever the numerator is doing. `psad_max_disagreement` above
+# catches a density the record contradicts *arithmetically*; this catches one
+# the record contradicts *clinically* -- the arithmetic is fine, and that is
+# exactly the problem. A gland of ~150 mL can turn a PSA that quintupled in
+# under two years into a density of 0.08, and that 0.08 then vetoes the case twice: it holds PI-RADS 3 below `psad_likely` so stage 1
+# says "no cancer indicated", and it sits below `psad_high` so it casts no
+# corroborating vote either. Between them they stop the case ever reaching the
+# stage-3 question, which is the one a clinician would actually ask of a man
+# who already has prostate cancer: is his grade still what we think it is?
+#
+# So this is not a new decision rule. `RECLASSIFICATION` already says that an
+# unretrievable grade is a reason to take tissue; this only stops an
+# uninterpretable number from suppressing the case before that question is put.
+#
+# ⚠️ Both gates are needed, and the second is the one that matters. The
+# confound is not "the gland is large" -- it is that we cannot tell whether an
+# ELEVATED PSA came from the tumour or from the bulk. Where the PSA is low
+# there is nothing to attribute and a diluted density really is reassuring
+# (large glands with a PSA under 5 must not fire, and do not).
+#
+# Gating on PI-RADS 3 instead scores identically on all 91 but for the wrong
+# reason, and extending THAT to PI-RADS 4 breaks the low-PSA `no` cases
+# (ranking 0.8618 -> 0.8448). Gated on the PSA, PI-RADS need not appear at all.
+#
+# ⚠️ Neither level is fitted to a boundary: on all 91 every PSA line in
+# 5.0-12.4 and every volume line in 50-149 mL selects the same single case.
+# They are deliberately NOT the same keys as `net_benefit.psa_legible` (8) and
+# `live.vol_large` (70), which happen to sit in those ranges: those answer
+# different questions, and coupling them would move this gate silently.
+#
+# ⚠️ n=1. This fires on ONE of the 195 released Task 1 cases, so the evidence
+# is the mechanism and the reference rationale, which asks for a confirmatory
+# biopsy in a very large prostate and marks `vol` DECISIVE, the only decisive
+# variable in that record -- not the count. Ranking 0.8528 -> 0.8618,
+# accuracy 0.9231 -> 0.9341, FN 3 -> 2, nothing else moves.
+confounded_density:
+  vol_confounds_ml: 70      # above this the gland can carry the PSA on its own
+  psa_needs_explaining: 8   # ... and below this there is no elevation to attribute
+
+# The corroborating channels.  A channel votes when its own reading is
+# suspicious; agreement with PI-RADS is what builds certainty.
+corroboration:
+  psa_high: 15              # ng/mL
+  psad_high: 0.10           # ng/mL/mL
+  dre_suspicious:
+    - Nodus
+    - Suspicious
+    - Abnormal
+  secure_at: 2              # this many corroborating votes and the picture is
+                            # no longer in doubt
+
+# ---- stage 2: how sure are we? ------------------------------------------
+# An established diagnosis means f is answering "is there cancer?" when the
+# question actually asked is "does re-sampling change anything?".
+certainty:
+  uncertain_encounters:
+    - "Re-evaluation - prior PCa diagnosis"
+
+# A prior grade, when the record states one, is the strongest evidence there
+# is that the diagnosis is already secure -- it is the diagnosis. ISUP 3 and
+# above is unambiguously significant disease: the next step is treatment, not
+# more tissue. ISUP 1-2 continue to the current-suspicion/reclassification
+# question because favourable-intermediate disease may remain on surveillance
+# and a new MRI finding can make repeat tissue useful.
+# The grade is prose in the previous notes ("low-grade disease", "Gleason
+# 3+4"), so it has to be retrieved and read, not looked up in the prompt.
+prior_grade:
+  significant_at: 3         # ISUP >= this: treat, do not re-sample
+  unambiguous_at: 3         # ISUP >= this: and there is nothing to argue about
+
+# ---- when the density is the reassurance --------------------------------
+# `DENSITY_FOLLOW_UP`. A man already known to carry prostate cancer, whose grade
+# is not on record, whose lesion nothing else corroborates, and whose PSA density
+# is genuinely low, is a surveillance question rather than a repeat-biopsy one.
+# The reference reasons the same way: a PI-RADS 4 lesion with a low density
+# can be followed up pending the result of the earlier biopsy.
+#
+# The branch reuses `suspicion.psad_contradicts` (0.08) rather than adding a
+# level of its own: it is the same reading of the same number, differing only in
+# what the case does with it once a diagnosis is already established.
+#
+# ⚠️ There is no PI-RADS gate and there cannot be one. All four cases this fires
+# on are PI-RADS 4-5, where EAU recommends biopsy in every density cell, and
+# the one case that must stay `yes` is PI-RADS 4 like three of them.
+# Measured: a PI-RADS <= 3 gate fires on nothing at all, and PI-RADS <= 4 scores
+# 79/91 against 81/91. That case is excluded by `usable_density` instead.
+#
+# ⚠️ NOT CONFIRMED ON THE DEVELOPMENT COHORT. 0 of the 11 established-PCa cases
+# in `external_data/` reach its precondition, so those 50 cases neither support
+# nor contradict it. That matters because this rule shares its direction --
+# push an established-PCa case toward `no` -- with two rules the development
+# cohort DID reject: `MANAGEMENT_INVARIANT` (PSA >= 20) cost 2 there, and
+# reversing `DENSITY_CONTRADICTS_IMAGING` cost 1. Revisit if that cohort grows.
+
+# ---- stage 3: could new histology change what happens next? -------------
+# Runs only for a man who already carries a prostate-cancer diagnosis. Missing
+# grade is a direct reason to obtain tissue. A documented significant grade can
+# make repeat tissue redundant; PSA alone cannot, because staging and patient
+# fitness are needed before management can be called invariant.
+net_benefit:
+  age_no_benefit: 75
+
+  # How sure we are that the tissue is redundant depends on how legible the
+  # disease is, and PSA is the channel that says so.  Above this level the PSA
+  # corroborates the MRI and the case commits to a management path.  Below it,
+  # a man with a suspicious MRI and an unremarkable PSA is a surveillance
+  # question -- "has the lesion grown?" -- and the prior imaging that would
+  # answer it is not in our inputs.  Across all 91 labelled cases the clinician
+  # called PSA < 8 clear only 49% of the time, against 73% at 8-15 and 87%
+  # above 15.
+  psa_legible: 8
+
+# ---- how legible is the MRI itself? -------------------------------------
+# PI-RADS is a certainty scale in its own right: 2 unlikely, 3 equivocal,
+# 4 probably, 5 highly likely.  Its extremes are the confident readings by
+# definition, and on a branch where nothing else corroborates, the MRI's own
+# confidence is ours.  Across all 91 labelled cases the clinician called
+# PI-RADS 2 or 5 clear 76% of the time against 48% for 3 or 4.
+mri_unambiguous:
+  at_or_below: 2
+  at_or_above: 5
+
+# ---- when a variable is live at all -------------------------------------
+live:
+  vol_large: 70             # a big gland is what makes a density reading matter
+  no_biopsy_history:        # nothing to consult: no prior biopsy to speak of
+    - "Follow-up - PSA + MRI"
+
+# ---- which recorded conditions actually shorten a life ------------------
+# ⚠️ READ ONLY BY `task1_evidence.py`. `apply_policy` does not consult this
+# table and no decision depends on it.
+#
+# The stage-3 question is life expectancy, and a raw count of `pmhx` cannot
+# answer it: of the 21 conditions this release uses, the five most common --
+# hypertension (80), hypercholesterolaemia (77), osteoarthritis (68), BPH (58)
+# and obesity (37) -- shorten nobody's life, and they are roughly 60% of every
+# recorded burden. That is why the raw count is non-monotone against the labels
+# (0.68 / 0.46 / 0.81 for 0 / 1-2 / 3+ comorbidities), and it is the same defect
+# the 2026-08-31 judgment run hit from the other side: shown a frailty passage,
+# the model named hypertension and osteoarthritis as life-limiting on 12 of 20
+# cases.
+#
+# Weights are Charlson-shaped: 0 for a condition that does not shorten life, 1
+# for one that does, 2 for organ failure. A condition absent from this table is
+# scored 1 -- an unrecognised diagnosis is more likely to matter than not, and
+# scoring it 0 would let a vocabulary change silently deflate the burden.
+#
+# ⚠️ This is still a STAND-IN. EAU asks for G8 or the Clinical Frailty Scale and
+# neither is in the record, nor is performance status or life expectancy.
+comorbidity_weights:
+  chronic kidney disease: 2
+  coronary artery disease: 1
+  copd: 1
+  atrial fibrillation: 1
+  type 2 diabetes: 1
+  diabetes: 1
+  hypertension: 0
+  hypercholesterolaemia: 0
+  osteoarthritis: 0
+  benign prostatic hyperplasia: 0
+  obesity (bmi >30): 0
+
+# ---- what the record does not say ---------------------------------------
+# The reference rationales for the re-evaluation branches keep asking for two
+# things, and the 2026-08-28 corpus read established that neither is anywhere in
+# the data: the grade of the earlier biopsy, and the size of the lesion on the
+# earlier MRI. Naming an absence is free, is honest, and is exactly what the
+# clinicians do -- "Need to know initial ISUP and MRI results", "missing also
+# size of earlier PIRADS 4 lesion".
+#
+# ⚠️ Each claim is made only on the branch where we actually looked, because an
+# unchecked "not documented" is a fabrication like any other. The grade claim
+# needs `read_prior_grade` to have run and returned nothing, which happens only
+# on the prior-PCa branch. The lesion claim is safe everywhere: 0 of 195 Task 1
+# records contain prior-size or interval-change language (the two apparent hits
+# are PSA comparisons).
+undocumented:
+  prior_grade:
+    encounters: ["Re-evaluation - prior PCa diagnosis"]
+    text: "the ISUP grade of the earlier biopsy"
+  lesion_change:
+    encounters:
+      - "Re-evaluation - prior PCa diagnosis"
+      - "Re-evaluation - prior negative biopsy"
+    min_pirads: 3
+    text: "the size of the lesion on any earlier MRI, which leaves interval change unassessable"
+
+# ---- what would change the answer ---------------------------------------
+# A `no` that does not say what would make it a `yes` is a refusal, not a
+# recommendation, and a quarter of the reference rationales on our `no` cases
+# name a trigger explicitly -- "A change in P4 lesion size might trigger a
+# biopsy". The trigger is not a guess about the reference: it is the negation of
+# whichever condition held this case at `no`, so each branch states its own
+# decision boundary back to the reader.
+# ---- what happens next, per branch --------------------------------------
+# ⚠️ PROSE ONLY. Read by the rationale layer; no branch reads it and no
+# decision, weight or confidence depends on it. Added 2026-09-08.
+#
+# The closing action used to be one of two strings keyed on the decision alone,
+# and on two branches it recommended the opposite of the reference:
+#   NO_BENEFIT                   we said "repeat PSA"; reference: "Stop
+#                                checking PSA, no need for diagnostics"  (0.667)
+#   DISEASE_ALREADY_SIGNIFICANT  we said "repeat PSA"; reference: "should be
+#                                recommended treatment"                  (0.725)
+# against 0.833 on CERTAIN and 0.875 on GRADE_ON_RECORD, which happened to suit
+# the generic string. A `yes` closed on "histopathological assessment after
+# prostate biopsy", which the judge called "procedural" -- it restates that a
+# biopsy yields histology rather than saying what the biopsy is for.
+next_step:
+  # `no` branches where more PSA is exactly the wrong answer
+  NO_BENEFIT: "no further diagnostic testing; review only if symptoms change"
+  DISEASE_ALREADY_SIGNIFICANT: "proceed to treatment planning for the documented grade"
+  GRADE_ON_RECORD: "continue the current management plan for the documented grade"
+  DENSITY_FOLLOW_UP: "interval PSA with repeat MRI rather than tissue"
+  # `yes` branches -- say what the biopsy has to achieve
+  # ⚠️ These two carry EITHER decision (`task1.py::_DECISION` fixes the rest),
+  # so each is keyed by the decision as well as the branch.
+  # ⚠️ The decision keys are QUOTED. Unquoted `yes:`/`no:` are booleans in
+  # YAML 1.1, so PyYAML returns {True: ..., False: ...} and the lookup by the
+  # decision string silently misses, falling back to the generic wording.
+  CERTAIN:
+    "yes": "targeted biopsy of the index lesion with systematic cores"
+    "no": "interval PSA with repeat MRI if the picture changes"
+  TISSUE_INFORMATIVE:
+    "yes": "targeted biopsy of the index lesion with systematic cores"
+    "no": "interval PSA with repeat MRI if the picture changes"
+  RECLASSIFICATION: "targeted biopsy of the index lesion to re-establish the grade"
+  DENSITY_CONTRADICTS_IMAGING: "targeted biopsy of the index lesion with systematic cores"
+  BIOCHEMICAL_OVERRIDE: "targeted biopsy of the index lesion with systematic cores"
+  MANAGEMENT_INVARIANT: "staging before any treatment decision"
+
+triggers:
+  BIOCHEMICAL_OVERRIDE: ""
+  DENSITY_CONTRADICTS_IMAGING: ""
+  GRADE_ON_RECORD: "tissue would be indicated if the picture changed -- a further PSA rise, or a new finding on repeat imaging"
+  RECLASSIFICATION: "retrieving the original pathology report would settle this without a further biopsy"
+  DISEASE_ALREADY_SIGNIFICANT: "re-sampling would be indicated only if the documented grade were in doubt"
+  NO_BENEFIT: "this reflects age and prior sampling rather than the imaging, and would change if life expectancy or symptoms changed"
+  DENSITY_FOLLOW_UP: "a rising PSA density, or retrieval of the earlier biopsy grade, would change this"
+  CERTAIN: "a rise in PI-RADS category on repeat imaging would change this"
+  TISSUE_INFORMATIVE: "a rise in PI-RADS category on repeat imaging would change this"
+
+# ---- how a role becomes a reported weight -------------------------------
+# settled    produced the answer on the branch taken
+# consulted  live on the branch taken; its value could change the answer
+# available  observed and part of the picture, but not on this branch
+# unused     never consulted by any branch
+roles:
+  settled: decisive
+  consulted: important
+  available: noted
+  unused: not_used
+
+# ---- reporting ----------------------------------------------------------
+# null section = visible in the structured prompt, so no document reveal is
+# needed. PSA, age, and bx are supplied up front in validation. Opening the PSA
+# trend or pathology report merely to repeat those fields would defend nothing
+# and cost tool precision.
+sections:
+  pirads: radiology_report
+  psad: radiology_report
+  vol: radiology_report
+  cspca: radiology_report
+  psa: null
+  age: null
+  dre: null
+  comorbidity: null
+  fh: family_history
+  bx: null
+
+# Findings the patient card carries directly. They ground no section, but they
+# are still observations the rationale can and should point at.
+#
+# ⚠️ AGE WAS REMOVED HERE on 2026-09-01, and this is the same lesson the
+# 2026-08-28 debug submission taught Task 3: THE JUDGE'S VIEW IS THE
+# CLINICAL-DATA SOCKET, NOTHING ELSE. `evaluate.py` builds the GEval input as
+# `{"clinical_data": pred["clinical_data"], ...}` and fills that from the job's
+# own input socket, so `prompt.json` is invisible to it. Measured across the
+# release, a prompt field's value appears literally in that socket:
+#
+#   psa 195/195   psad 195/195   vol 195/195   cspca 195/195   pirads 194/195
+#   age  55/195 (28%)            dre 1/195 (1%)
+#
+# Age is not in any document, so naming it reads as a fabrication however true
+# it is. The judge said so on 7 of 79 Task 1 rationales and 12 of 64 Task 2
+# ones -- "hallucinates the patient's age of 73 years, which is not present in
+# the Input" -- and those cases mean 0.471 against 0.771 for the rest (Task 2:
+# 0.517 against 0.750). Age still reaches the MODEL as background and is still
+# weighted; it is simply never asserted back.
+patient_card:
+  - psa
+  - bx
+
+labels:
+  pirads: "PI-RADS {value}"
+  psad: "PSA density {value}"
+  vol: "prostate volume {value} mL"
+  psa: "PSA {value} ng/mL"
+  age: "age {value}"
+  dre: "{value} DRE"
+  cspca: "csPCa probability {value}"
+  comorbidity: "{value} comorbidities recorded"
+  fh: "family history {value}"
+  bx: "prior biopsy status {value}"
+
+# ---- when the procedure itself is not free -----------------------------
+# `procedural_risk`. A biopsy is an invasive procedure with bleeding, sepsis
+# and anaesthetic risk, and the man who carries that risk is the one who has to
+# accept it. On a first or repeat diagnostic biopsy the imaging says *whether*
+# there is something to find; these factors say what it costs this man to look.
+# When both are live and neither settles the other, the recommendation stands
+# but the conversation is genuinely shared -- which is what the reference means
+# by `borderline`.
+#
+# The reference rationales on the cases it fires on cite comorbidity or age
+# against an otherwise clear indication. All four reference `borderline` cases in this population cite age, fitness or
+# comorbidity in the rationale; none of the three `uncertain` ones do -- those
+# name a missing prior MRI instead.
+#
+# ⚠️ SCOPED TO A RECOMMENDED BIOPSY IN A MAN WITHOUT AN ESTABLISHED DIAGNOSIS,
+# and the scoping is the rule. In the established-PCa population the same
+# factors carry nothing (yes: 55% clear with risk vs 42% without; no: 67% vs
+# 47% -- direction reverses), because there the question is re-grading, not
+# whether the man can tolerate the procedure.
+#
+# ⚠️ RISK NEVER PRODUCES `uncertain`. Measured on this population: borderline
+# 3/10 with a risk factor against 1/23 without (Fisher p = 0.073), while
+# uncertain is 1/10 against 2/23 (p = 1.00). `uncertain` is a named absent
+# fact; this is a trade-off over a fact we have.
+#
+# ⚠️ ITERATED 2026-09-08: the risk must be material enough to make the biopsy
+# decision shared, not merely a common diagnosis or medication. Low-dose
+# aspirin alone is compatible with prostate biopsy without more severe
+# bleeding, and the transperineal approach has a low infection rate. CKD alone
+# and stable coronary disease therefore no longer demote confidence either.
+# This removes the two false-positive demotions (CKD only; aspirin + CAD)
+# while retaining all three reference-borderline cases. It changes confidence only: 0.8333 -> 0.8457 gate-passed, 0.8132 ->
+# 0.8242 ungated, kappa 0.4313 -> 0.4547, ranking 0.8388 -> 0.8400.
+#
+# ⚠️ A DECISIVE PRESENT FINDING OUTRANKS IT, which is the same precedence that
+# makes a missing prior grade lose to a present one. PI-RADS 5 in a man young
+# enough to be treated is 0/5 borderline in this population against 3/5 for
+# everything else (Fisher p = 0.007 against the rest of the cohort). EAU's own
+# evidence summary puts csPCa detection at 83% for PI-RADS 5 against 55% at 4.
+#
+# ⚠️ `settled_below_age` is deliberately NOT `net_benefit.age_no_benefit`,
+# which happens to carry the same number. That one asks when a REPEAT biopsy
+# stops paying; this one asks when a man is still young enough that a PI-RADS 5
+# read settles the conversation. Coupling them would move this gate silently.
+#
+# ⚠️ Untestable on the external development cohort: the CSV carries no
+# medication or comorbidity column, so no row can reach this rule. It therefore
+# carries the same one-cohort ceiling as the four rules of 2026-09-03.
+procedural_risk:
+  # Bleeding -- anticoagulation/strong antiplatelet therapy, not aspirin alone.
+  anticoagulants:
+    - apixaban
+    - warfarin
+    - rivaroxaban
+    - edoxaban
+    - dabigatran
+    - clopidogrel
+  bleeding_history:
+    - Atrial fibrillation
+  # Infective -- diabetes remains material; CKD alone does not.
+  infection_history:
+    - Type 2 diabetes
+  # Anaesthetic / cardiorespiratory reserve; stable CAD alone does not suffice.
+  anaesthetic_history:
+    - COPD
+  # The present finding that outranks all of the above.
+  settled_pirads: 5
+  settled_below_age: 75
